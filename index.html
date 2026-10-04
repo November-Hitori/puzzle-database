@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f0e8" />
+    <title>PuzArchive · Puzzle database</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#home" aria-label="PuzArchive 首页">
+          <span class="brand-mark">PA</span>
+          <span><strong>PuzArchive</strong><small>puzzle database</small></span>
+        </a>
+        <nav class="primary-nav">
+          <p class="nav-label">Workspace</p>
+          <a class="nav-item" data-route-link="home" href="#home"><span class="nav-icon">⌂</span><span>首页</span></a>
+          <a class="nav-item" data-route-link="library" href="#library"><span class="nav-icon">▤</span><span>题库</span><span class="nav-count">128</span></a>
+          <a class="nav-item" data-route-link="collections" href="#collections"><span class="nav-icon">▥</span><span>题集列表</span></a>
+          <a class="nav-item" data-route-link="files" href="#files"><span class="nav-icon">⌘</span><span>文件管理</span></a>
+          <p class="nav-label nav-label-spaced">Personal</p>
+          <a class="nav-item" data-route-link="records" href="#records"><span class="nav-icon">✓</span><span>我的记录</span><span class="nav-dot"></span></a>
+          <a class="nav-item" data-route-link="authors" href="#authors"><span class="nav-icon">◎</span><span>作者</span></a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="sync-status"><span class="status-light"></span><span>本地演示数据</span><span class="mono">v0.2</span></div>
+          <button class="profile-chip" type="button" id="profileButton"><span class="avatar avatar-amber">L</span><span class="profile-copy"><strong>Lin</strong><small>Guest account</small></span><span class="profile-more">···</span></button>
+        </div>
+      </aside>
+
+      <main class="main-content" id="top">
+        <header class="topbar">
+          <div class="breadcrumb"><span>Workspace</span><span class="crumb-separator">/</span><strong id="breadcrumbCurrent">首页</strong></div>
+          <div class="top-actions"><button class="icon-button" type="button" title="搜索" aria-label="搜索" id="searchButton">⌕</button><button class="icon-button" type="button" title="通知" aria-label="通知" id="notificationButton"><span class="notification-glyph">◌</span><span class="notification-dot"></span></button><button class="login-button" type="button" id="loginButton">登录 <span>↗</span></button></div>
+        </header>
+        <div id="app" class="page-wrap"></div>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="modalBackdrop" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <button class="modal-close icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+        <div id="modalContent"></div>
+      </section>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
