@@ -89,6 +89,71 @@ function renderEmbed(puzzle) {
 
 function isSupportedPuzzleUrl(value) { return parseTrustedPuzzleUrl(value) !== null; }
 
+function bindLibrary() {
+  document.querySelector('#addPuzzleButton')?.addEventListener('click', openAddPuzzle);
+  document.querySelector('#filterButton')?.addEventListener('click', () => {
+    const row = document.querySelector('#filterRow');
+    row.hidden = !row.hidden;
+  });
+  document.querySelectorAll('.filter-pill').forEach((button) => button.addEventListener('click', () => {
+    state.filter = button.dataset.filter;
+    state.visible = 6;
+    renderRoute();
+  }));
+  document.querySelectorAll('.segment').forEach((button) => button.addEventListener('click', () => {
+    state.sort = button.dataset.sort;
+    renderRoute();
+  }));
+  document.querySelector('#loadMoreButton')?.addEventListener('click', () => {
+    state.visible = Math.min(state.visible + 2, filteredPuzzles().length);
+    renderRoute();
+    showToast('已加载更多题目');
+  });
+  document.querySelector('#noticeButton')?.addEventListener('click', () => showToast('公告详情将在公告模块接入后开放'));
+}
+
+function openAddPuzzle() {
+  openModal(`<p class="modal-eyebrow">NEW ENTRY</p><h2 id="modalTitle">添加一道题目</h2><p class="modal-intro">支持 puzz.link、Penpa+ 外链，或选择纯填空题。</p><label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" placeholder="https://puzz.link/p?..." /></label><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" placeholder="例如：Five Cells" /></label><label class="form-field"><span>作者</span><input id="newPuzzleAuthor" type="text" placeholder="作者名" /></label><label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external">外部题目（puzz.link / Penpa+）</option><option value="blank">纯填空题</option></select></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
+  document.querySelector('#savePuzzleButton').addEventListener('click', async () => {
+    const title = document.querySelector('#newPuzzleTitle').value.trim();
+    if (!title) {
+      showToast('请先填写题目标题');
+      return;
+    }
+    const mode = document.querySelector('#newPuzzleMode').value;
+    const url = document.querySelector('#newPuzzleUrl').value.trim();
+    if (mode === 'external' && !isSupportedPuzzleUrl(url)) {
+      showToast('外部题目必须使用受支持的 puzz.link、Penpa+ 或同类工具链接');
+      return;
+    }
+    const input = {
+      title,
+      type: mode === 'blank' ? '填空题' : '逻辑题',
+      author: document.querySelector('#newPuzzleAuthor').value.trim() || '未署名',
+      source: mode === 'blank' ? '填空题' : getPuzzleSource(url),
+      url,
+      inputMode: mode,
+      answer: ''
+    };
+    try {
+      if (state.api) {
+        const data = await apiRequest('/api/puzzles', { method: 'POST', body: JSON.stringify(input) });
+        applyPuzzleData(data.puzzles);
+      } else {
+        const next = Math.max(...state.puzzles.map((puzzle) => puzzle.number)) + 1;
+        state.puzzles.unshift({ number: next, ...input, tags: [mode === 'blank' ? '填空题' : '新题目'], ratings: [0, 0, 0], votes: 0, completed: false, note: '等待作者补充说明。', rules: '等待作者补充规则。' });
+        saveState();
+      }
+      closeModal();
+      const newest = Math.max(...state.puzzles.map((puzzle) => puzzle.number));
+      window.location.hash = `#puzzle-${newest}`;
+      showToast('题目已创建');
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
+
 function bindPuzzle(number) {
   const puzzle = state.puzzles.find((item) => item.number === number);
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number));
