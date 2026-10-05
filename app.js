@@ -14,7 +14,6 @@ const seedPuzzles = [
 
 const state = {
   puzzles: JSON.parse(localStorage.getItem('puzarchive-puzzles') || 'null') || seedPuzzles,
-  puzzles: initialPuzzles,
   folders: JSON.parse(localStorage.getItem('puzarchive-folders') || 'null') || [
     { id: 'india', name: 'Logic Masters India', count: 38, parent: null },
     { id: 'japan', name: '日本パズル協会', count: 24, parent: null },
