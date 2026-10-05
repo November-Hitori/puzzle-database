@@ -3,14 +3,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addFolder, addPuzzle, addPuzzleTag, completeAndRate, getCollection, getCollections, getFolders, getPuzzles, getTags } from './db.mjs';
+import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
 const userId = 'demo-user';
-const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  `frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'self'"
+].join('; ');
 
 function sendJson(response, status, payload) {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin' });
   response.end(JSON.stringify(payload));
 }
 
@@ -22,12 +36,7 @@ async function readJson(request) {
 }
 
 function isSupportedPuzzleUrl(value) {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    return host === 'puzz.link' || host.endsWith('.puzz.link') || host.includes('penpa');
-  } catch { return false; }
+  return parseTrustedPuzzleUrl(value) !== null;
 }
 
 async function handleApi(request, response, pathname) {
@@ -43,7 +52,7 @@ async function handleApi(request, response, pathname) {
   if (request.method === 'POST' && pathname === '/api/puzzles') {
     const input = await readJson(request);
     if (!input.title) return sendJson(response, 400, { error: 'title is required' });
-    if (input.inputMode !== 'blank' && !isSupportedPuzzleUrl(input.url)) return sendJson(response, 400, { error: 'only puzz.link or penpa+ URLs are supported' });
+    if (input.inputMode !== 'blank' && !isSupportedPuzzleUrl(input.url)) return sendJson(response, 400, { error: 'only supported puzzle tool URLs are allowed' });
     const id = addPuzzle(input);
     return sendJson(response, 201, { id, puzzles: getPuzzles(userId) });
   }
@@ -75,7 +84,7 @@ function serveStatic(response, pathname) {
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const filePath = path.resolve(rootDir, relative);
   if (!filePath.startsWith(rootDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return sendJson(response, 404, { error: 'Not found' });
-  response.writeHead(200, { 'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream' });
+  response.writeHead(200, { 'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream', 'Content-Security-Policy': contentSecurityPolicy, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'SAMEORIGIN' });
   fs.createReadStream(filePath).pipe(response);
 }
 
