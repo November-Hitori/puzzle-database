@@ -4,7 +4,7 @@ import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
 const seedPuzzles = [
   { number: 128, title: 'Thermometer', type: '逻辑题', author: 'Mina K.', tags: ['Thermometer', 'Example Puzzle'], ratings: [3.4, 2.1, 4.8], votes: 18, completed: false, source: 'puzz.link', url: 'https://puzz.link/', note: '一组温度计交错在网格中。填满它们时，注意每支温度计的方向。', rules: '每支温度计必须从球形端开始连续填满，直到边界或另一支温度计。', inputMode: 'external' },
   { number: 127, title: 'Five Cells', type: '逻辑题', author: 'Yusuke', tags: ['Five Cells'], ratings: [3.7, 3.5, 4.6], votes: 26, completed: true, source: 'puzz.link', url: 'https://puzz.link/', note: '每一块区域都恰好包含五个格子。相邻区域的边界会告诉你下一步。', rules: '将盘面分成每块五格的区域，线条不得形成面积不符的闭合区域。', inputMode: 'external' },
-  { number: 126, title: 'Wordoku No. 03', type: '文字题', author: 'Katherine L.', tags: ['Wordoku'], ratings: [2.2, 3.8, 4.2], votes: 12, completed: false, source: 'penpa+', url: 'https://swaroopg92.github.io/penpa-edit/', note: '字母替代数字的经典数独变体，词语会给出额外线索。', rules: '每行、每列和每个宫内都不得重复字母。', inputMode: 'external' },
+  { number: 126, title: 'Wordoku No. 03', type: '文字题', author: 'Katherine L.', tags: ['Wordoku'], ratings: [2.2, 3.8, 4.2], votes: 12, completed: false, source: 'penpa+', url: 'https://penpa-edit.com/', note: '字母替代数字的经典数独变体，词语会给出额外线索。', rules: '每行、每列和每个宫内都不得重复字母。', inputMode: 'external' },
   { number: 125, title: 'The Wrong Puzzle', type: '逻辑题', author: 'Lumen', tags: ['Wrong Puzzle', 'Meta'], ratings: [4.6, 4.3, 4.5], votes: 31, completed: true, source: '填空题', url: '', note: '这是一个故意写错的谜题。先找到规则中的不一致，再开始解题。', rules: '找出题面中的矛盾，并在答案框写下导致矛盾的规则。', inputMode: 'blank', answer: '规则 3' },
   { number: 124, title: 'Arrow Maze', type: '逻辑题', author: 'Mori', tags: ['Arrow Maze', 'Example Puzzle'], ratings: [3.1, 2.8, 4.1], votes: 9, completed: false, source: 'puzz.link', url: 'https://puzz.link/', note: '沿箭头方向走过每个格子，每一步都会缩小下一步的选择。', rules: '从起点出发，遵守箭头方向访问全部格子且不重复。', inputMode: 'external' },
   { number: 123, title: 'Regional Sudoku', type: '逻辑题', author: 'Aster', tags: ['Sudoku'], ratings: [3.9, 3.2, 4.7], votes: 22, completed: true, source: 'puzz.link', url: 'https://puzz.link/', note: '区域边界会在标准数独之外制造新的关系。', rules: '每行、每列和每个不规则区域都填入 1 至 9。', inputMode: 'external' },
@@ -88,6 +88,44 @@ function renderEmbed(puzzle) {
 }
 
 function isSupportedPuzzleUrl(value) { return parseTrustedPuzzleUrl(value) !== null; }
+
+function openRating(number) {
+  const puzzle = state.puzzles.find((item) => item.number === number);
+  const current = puzzle.userRating || [3, 3, 3];
+  openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。提交后，题库会显示所有用户评分的平均值。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`);
+  ['logic', 'intuition', 'love'].forEach((key) => {
+    const input = document.querySelector(`#${key}Rating`);
+    const output = document.querySelector(`#${key}Value`);
+    input.addEventListener('input', () => {
+      output.textContent = input.value;
+    });
+  });
+  document.querySelector('#submitRatingButton').addEventListener('click', async () => {
+    const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value));
+    try {
+      if (state.api) {
+        const data = await apiRequest(`/api/puzzles/${number}/complete-rating`, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) });
+        applyPuzzleData(data.puzzles);
+      } else {
+        const previous = puzzle.userRating;
+        puzzle.userRating = ratings;
+        puzzle.completed = true;
+        if (!previous) {
+          puzzle.ratings = puzzle.ratings.map((average, index) => Number(((average * puzzle.votes + ratings[index]) / (puzzle.votes + 1)).toFixed(1)));
+          puzzle.votes += 1;
+        } else {
+          puzzle.ratings = puzzle.ratings.map((average, index) => Number(((average * puzzle.votes - previous[index] + ratings[index]) / puzzle.votes).toFixed(1)));
+        }
+        saveState();
+      }
+      closeModal();
+      renderRoute();
+      showToast('完成记录已保存，题库平均评分已更新');
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
 
 function bindLibrary() {
   document.querySelector('#addPuzzleButton')?.addEventListener('click', openAddPuzzle);
