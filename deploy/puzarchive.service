@@ -1,0 +1,30 @@
+[Unit]
+Description=PuzArchive private puzzle archive
+After=network.target
+
+[Service]
+Type=simple
+User=puzarchive
+Group=puzarchive
+WorkingDirectory=/opt/puzarchive/app
+EnvironmentFile=/etc/puzarchive/puzarchive.env
+Environment=HOST=127.0.0.1
+Environment=PORT=4173
+Environment=PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite
+Environment=PUZARCHIVE_USERS_PATH=/var/lib/puzarchive/trusted-users.json
+ExecStart=/opt/puzarchive/runtime/bin/node /opt/puzarchive/app/server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/puzarchive
+ReadOnlyPaths=/opt/puzarchive/app
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
