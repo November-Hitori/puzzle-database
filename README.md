@@ -1,18 +1,18 @@
 # PuzArchive prototype
 
-这是 Puzzle Database 的前端原型，当前使用静态 HTML、CSS 和 JavaScript 演示首页、题库、题目页、题集和文件管理的信息架构。
+这是 Puzzle Database 的私有谜题档案。Node.js 提供 SQLite API 和静态前端；访问应用内容前需要使用受信任成员的邀请码登录。
 
 ## 本地运行
 
-在项目目录执行（数据库模式）：
+需要 Node.js 22.13 或更新版本。在项目目录运行：
 
 ```powershell
 npm run dev
 ```
 
-然后打开 <http://localhost:4173/>。第一次启动会自动创建 `data/puzarchive.sqlite`，并写入演示题目、评分、完成记录和文件夹。
+然后打开 <http://localhost:4173/>。第一次启动会自动创建 `data/puzarchive.sqlite`，并生成一位可信成员的独立邀请码至 `data/trusted-users.json`。服务会尝试将该文件权限设为仅当前用户可读写（0600）；在 `/mnt/c` 等 Windows/WSL 挂载目录上，Unix 权限可能无法生效，实际访问由 Windows ACL 控制。请将工作区放在仅可信用户可访问的位置，并确认该文件继承了合适的 Windows ACL。该文件被 Git 忽略。将邀请码通过私下方式交给该成员。加入成员时，在这个 JSON 数组中添加唯一 `id`、显示名 `name` 和至少 16 个字符的随机 `accessCode`，然后重启服务；移除成员或更换其邀请码也需重启，并会使其已有会话失效。请勿将邀请码粘贴到终端命令或提交到 Git。
 
-也可以使用任意静态文件服务器运行 `index.html`；这种方式不会连接数据库，前端会回退到浏览器 `localStorage` 演示模式。
+服务默认只绑定 `127.0.0.1`。有明确的可信网络部署时可设置 `HOST` 和 `PORT`。应用 API 都需要登录；数据库模式下不要用静态服务器代替本服务。
 
 ## 当前数据库接入
 
@@ -20,14 +20,12 @@ npm run dev
 
 API 包括：
 
-- `GET /api/puzzles`：题目、完成状态、评分平均值和评分人数
-- `POST /api/puzzles`：创建外链题目或纯填空题
-- `POST /api/puzzles/:number/complete-rating`：写入完成记录和三个维度评分
-- `POST /api/puzzles/:number/tags`：给题目添加标签
-- `GET /api/folders`：读取文件夹
-- `POST /api/folders`：创建文件夹，可指定上级文件夹
-- `GET /api/collections`：读取题集列表
-- `GET /api/collections/:id`：读取题集详情、题目顺序和 IB/PB/SB 资料
+- `GET /api/session`、`POST /api/session`、`DELETE /api/session`：查询、建立和销毁私有会话
+- `GET /api/rules`、`POST /api/rules`：读取规则目录和新增规则；变体必须引用原始规则
+- `/api/calendar/puzzles`：读写独立日历题目、完成评分、标签和上传者设置的建议日期
+- `/api/puzzles`、`/api/folders`、`/api/collections`、`/api/tags`：现有公共题库管理 API，只包含公共题目
+
+邀请码对应独立可信身份，浏览器只持有 HttpOnly、SameSite=Strict 的会话 Cookie。提交操作校验同源来源。用环境变量 `PUZARCHIVE_DB_PATH`、`PUZARCHIVE_USERS_PATH` 可指定隔离数据库和成员配置路径（也用于测试）。
 
 评分在数据库中按用户保存：`puzzle_ratings(puzzle_id, user_id, logic, intuition, enjoyment)`。题库的三项评分由 SQL `AVG` 聚合产生，而不是由浏览器计算。
 
@@ -49,15 +47,25 @@ API 包括：
 - 文件管理页，支持来源、年份、题集的文件夹展示和新建文件夹
 - 题集列表、独立题集详情、题目顺序和 IB/PB/SB 资料栏
 - 我的记录和作者页面
-- 登录、通知、搜索等演示入口
+- 通知和搜索等演示入口
 - 桌面端和移动端响应式样式
 - 使用受信任的嵌入策略处理 puzz.link / penpa+ 页面，必要时回退到新标签页打开
 
-## 下一阶段
+## 本地测试
+
+```sh
+npm test
+```
+
+后端测试使用临时 SQLite 数据库，不会读取或写入 `data/puzarchive.sqlite`。
+
+## SQLite 数据
+
+升级会向既有数据库添加日历范围、规则引用、建议日期、提交者、规则目录、可信用户和会话表；原题目、评分、完成记录、文件夹和题集均会保留。启动升级前建议复制 `data/puzarchive.sqlite` 作备份。已有题目保持公共范围且不会被猜测或翻译规则。
+
+## 后续工作
 
 - 使用 Next.js 或其他正式应用框架拆分页面和组件
 - 将 SQLite 迁移到 PostgreSQL 与 ORM（需要多人部署或生产环境时）
-- 将当前演示用户替换为真实账户和用户 ID
-- 实现邮箱验证码、密码哈希、Session 和权限控制
-- 接入真实的题目添加、标签、留言板、题集和递归文件夹管理 API
-- 增加自动化测试、迁移脚本和生产部署配置
+- 接入真实的留言板、题集和递归文件夹管理 API
+- 增加生产部署配置
