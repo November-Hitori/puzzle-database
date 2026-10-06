@@ -1,5 +1,6 @@
 import { getPuzzleSource, hasConcretePuzzlePayload, parseTrustedPuzzleUrl } from './puzzle-url.mjs';
 import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
+import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 
 const state = {
   puzzles: [],
@@ -14,8 +15,14 @@ const state = {
   api: true,
   user: null,
   sessionChecked: false,
+  authMode: 'login',
+  authBusy: false,
+  authError: '',
+  authEpoch: 0,
+  logoutPending: false,
   serviceError: '',
   privateLoading: false,
+  sessionEpoch: 0,
   calendarSort: 'date',
   submissionDraft: null
 };
@@ -25,23 +32,47 @@ const modalContent = document.querySelector('#modalContent');
 const toastElement = document.querySelector('#toast');
 let toastTimer;
 
-async function apiRequest(path, options = {}) { const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options }); if (!response.ok) { let message = `HTTP ${response.status}`; try { message = (await response.json()).error || message; } catch {} if (response.status === 401 && state.sessionChecked && path !== '/api/session') handleUnauthorized(); throw new Error(message); } return response.status === 204 ? {} : response.json(); }
+async function apiRequest(path, options = {}) {
+  const authEndpoint = ['/api/session', '/api/register'].includes(path);
+  const requestEpoch = state.sessionEpoch;
+  const requestUserId = state.user?.id;
+  const authenticatedAtStart = Boolean(state.user);
+  const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options });
+  let payload = {};
+  if (response.status !== 204) {
+    try { payload = await response.json(); }
+    catch (error) {
+      if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
+      throw error;
+    }
+  }
+  if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    message = payload.error || message;
+    if (response.status === 401 && state.sessionChecked && authenticatedAtStart && !authEndpoint) handleUnauthorized();
+    throw new Error(message);
+  }
+  return payload;
+}
 function applyPuzzleData(puzzles) { state.puzzles = puzzles.map((puzzle) => ({ ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), tags: puzzle.tags || [], userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0) })); }
-async function bootstrapDatabase() { renderRoute(); try { const session = await apiRequest('/api/session'); state.sessionChecked = true; state.user = session.user || null; if (!state.user) { renderRoute(); return; } await loadPrivateData(); } catch (error) { state.sessionChecked = true; state.serviceError = error.message || '服务暂不可用'; renderRoute(); } }
-async function loadPrivateData() { state.privateLoading = true; state.serviceError = ''; renderRoute(); try { const [puzzleData, folderData, collectionData, ruleData, calendarData] = await Promise.all([apiRequest('/api/puzzles'), apiRequest('/api/folders'), apiRequest('/api/collections'), apiRequest('/api/rules'), apiRequest('/api/calendar/puzzles')]); applyPuzzleData(puzzleData.puzzles); state.folders = folderData.folders.map((folder) => ({ id: String(folder.id), name: folder.name, count: folder.count, parent: folder.parent })); state.collections = collectionData.collections; state.rules = ruleData.rules || []; state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle); state.privateLoading = false; renderRoute(); } catch (error) { state.privateLoading = false; if (state.user) state.serviceError = error.message || '无法加载私人数据'; renderRoute(); } }
+async function bootstrapDatabase() { clearPrivateState(); const epoch = ++state.sessionEpoch; state.sessionChecked = false; state.authError = ''; renderRoute(); try { const session = await apiRequest('/api/session'); if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = session.user || null; if (!state.user) { renderRoute(); return; } normalizeAuthenticatedRoute(); renderRoute(); await loadPrivateData(); } catch (error) { if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = null; state.serviceError = error.message || '服务暂不可用'; renderRoute(); } }
+async function loadPrivateData() { if (!state.user) return; const epoch = state.sessionEpoch; const userId = state.user.id; state.privateLoading = true; state.serviceError = ''; renderRoute(); try { const [ruleData, calendarData] = await Promise.all([apiRequest('/api/rules'), apiRequest('/api/calendar/puzzles')]); if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.rules = ruleData.rules || []; state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle); state.privateLoading = false; renderRoute(); } catch (error) { if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.privateLoading = false; state.serviceError = error.message || '无法加载私人数据'; renderRoute(); } }
 function normalizePuzzle(puzzle) { return { ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0), tags: puzzle.tags || [] }; }
-function clearPrivateState() { state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.serviceError = ''; state.privateLoading = false; closeModal(); }
-function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; renderRoute(); showToast('登录状态已失效，请重新登录'); }
+function isCurrentUserSession(epoch, userId) { return epoch === state.sessionEpoch && Boolean(state.user) && String(state.user.id) === String(userId); }
+function clearPrivateState() { state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
 function tagMarkup(tags) { return `<div class="tag-list">${tags.map((tag) => `<span class="tag ${tag === 'Wrong Puzzle' ? 'warning' : tag === 'Example Puzzle' ? 'type' : ''}">${esc(tag)}</span>`).join('')}</div>`; }
-function showToast(message) { toastElement.textContent = message; toastElement.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastElement.classList.remove('show'), 2600); }
+function showToast(message) { if (document.body.dataset.authState !== 'authenticated') return; toastElement.textContent = message; toastElement.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastElement.classList.remove('show'), 2600); }
 function openModal(content) { modalContent.innerHTML = content; modalBackdrop.hidden = false; document.body.style.overflow = 'hidden'; }
-function closeModal() { modalBackdrop.hidden = true; document.body.style.overflow = ''; }
+function closeModal() { modalBackdrop.hidden = true; modalContent.innerHTML = ''; document.body.style.overflow = ''; }
 function button(text, id = '', className = 'button button-dark') { return `<button class="${className}" type="button"${id ? ` id="${id}"` : ''}>${text}</button>`; }
 
 function getRoute() { const hash = window.location.hash.slice(1) || 'home'; const calendarMatch = hash.match(/^calendar-puzzle-(\d+)$/); const puzzleMatch = hash.match(/^puzzle-(\d+)$/); const collectionMatch = hash.match(/^collection-(\d+)$/); if (calendarMatch) return { name: 'calendar-puzzle', number: Number(calendarMatch[1]) }; if (puzzleMatch) return { name: 'puzzle', number: Number(puzzleMatch[1]) }; if (collectionMatch) return { name: 'collection', id: Number(collectionMatch[1]) }; return { name: hash.split('/')[0] || 'home' }; }
-function setBreadcrumb(name) { const labels = { home: '首页', library: '题库', collections: '题集列表', collection: '题集', files: '文件管理', records: '我的记录', authors: '作者', puzzle: '题目', calendar: '谜题日历', 'calendar-puzzle': '日历谜题', rules: '规则管理' }; document.querySelector('#breadcrumbCurrent').textContent = labels[name] || '首页'; const activeRoute = ['puzzle', 'collection'].includes(name) ? (name === 'collection' ? 'collections' : 'library') : name === 'calendar-puzzle' ? 'calendar' : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
+function normalizeAuthenticatedRoute() { const route = getRoute(); if (!['calendar', 'pending', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
+function setBreadcrumb(name) { const labels = { home: '谜题日历', library: '谜题日历', collections: '谜题日历', collection: '谜题日历', files: '谜题日历', records: '谜题日历', authors: '谜题日历', puzzle: '谜题日历', pending: '我的未完成谜题', calendar: '谜题日历', 'calendar-puzzle': '日历谜题', rules: '规则管理' }; const crumb = document.querySelector('#breadcrumbCurrent'); if (crumb) crumb.textContent = labels[name] || '谜题日历'; const activeRoute = name === 'calendar-puzzle' ? 'calendar' : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
 
 function filteredPuzzles() {
   const filtered = state.puzzles.filter((puzzle) => { if (state.filter === 'completed') return puzzle.completed; if (state.filter === 'wrong') return puzzle.tags.includes('Wrong Puzzle'); if (state.filter === 'logic') return puzzle.type === '逻辑题'; if (state.filter === 'word') return puzzle.type === '文字题'; return true; });
@@ -58,17 +89,21 @@ function renderLibrary() {
 function renderPuzzleRow(puzzle) { return `<div class="puzzle-row ${puzzle.completed ? 'completed' : ''}" role="row"><span class="cell-number" role="cell">#${puzzle.number}</span><div class="puzzle-main" role="cell"><a class="puzzle-title" href="#puzzle-${puzzle.number}">${esc(puzzle.title)}</a><span class="puzzle-subtitle">${esc(puzzle.type)} · ${esc(puzzle.source)}</span></div><span class="cell-author" role="cell"><a class="author-link" href="#authors">${esc(puzzle.author)}</a></span><span class="cell-tags" role="cell">${tagMarkup(puzzle.tags)}</span><span class="cell-rating" role="cell">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><a class="row-action" title="打开详情" aria-label="打开 ${esc(puzzle.title)}" href="#puzzle-${puzzle.number}">›</a></div>`; }
 
 const ruleCategories = ['涂黑', '填数', '分区', '置物', '路径', '其它'];
-function renderCalendar() {
-  const puzzles = [...state.calendarPuzzles].sort((a, b) => {
+function renderCalendar(pending = false) {
+  const puzzles = [...state.calendarPuzzles].filter((puzzle) => !pending || !puzzle.completed).sort((a, b) => {
     const ad = a.suggestedDate || '9999-99-99'; const bd = b.suggestedDate || '9999-99-99';
     return state.calendarSort === 'newest' ? b.number - a.number : ad.localeCompare(bd) || b.number - a.number;
   });
-  const rows = puzzles.map((puzzle) => `<a class="calendar-row" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '日期未定'}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${esc(puzzle.rule?.titleZh || puzzle.type)} · ${esc(puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small></span><span class="calendar-rating">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><span class="calendar-arrow">→</span></a>`).join('');
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>PRIVATE PUZZLE CALENDAR</p><h1>谜题日历<span class="heading-period">.</span></h1><p class="page-description">受信任成员共享的独立谜题空间。建议日期可留空，之后仍可归档。</p></div>${button('<span class="button-plus">+</span>提交日历谜题', 'addCalendarPuzzleButton')}</section><section class="calendar-toolbar"><div class="section-title-group"><h2>全部日历谜题</h2><span class="count-badge">${String(puzzles.length).padStart(2, '0')}</span></div><label class="calendar-sort-label" for="calendarSort">排序</label><select id="calendarSort" aria-label="日历谜题排序"><option value="date" ${state.calendarSort === 'date' ? 'selected' : ''}>建议日期</option><option value="newest" ${state.calendarSort === 'newest' ? 'selected' : ''}>最近提交</option></select></section><div class="calendar-list">${puzzles.length ? rows : `<div class="empty-state calendar-empty"><strong>日历还没有谜题</strong><span>可以先从规则目录中选择规则，再提交第一道日历谜题。</span>${button('提交日历谜题', 'emptyCalendarAdd', 'button button-light')}</div>`}</div></div>`;
+  const rows = puzzles.map((puzzle) => `<a class="calendar-row ${puzzle.completed ? 'is-completed' : ''}" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '日期未定'}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${esc(puzzle.rule?.titleZh || puzzle.type)} · ${esc(puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small></span><span class="calendar-progress">${puzzle.completed ? '✓ 你已完成' : '待你解题'}</span><span class="calendar-rating">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><span class="calendar-arrow">→</span></a>`).join('');
+  const pageTitle = pending ? '我的未完成谜题' : '谜题日历';
+  const emptyState = pending
+    ? `<div class="empty-state calendar-empty"><strong>没有待解题目</strong><span>这份清单只统计你自己的完成记录。</span><a class="button button-light" href="#calendar">查看全部投稿</a></div>`
+    : `<div class="empty-state calendar-empty"><strong>日历还没有谜题</strong><span>可以先从规则目录中选择规则，再提交第一道日历谜题。</span>${button('提交日历谜题', 'emptyCalendarAdd', 'button button-light')}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>PRIVATE PUZZLE CALENDAR</p><h1>${pageTitle}<span class="heading-period">.</span></h1><p class="page-description">全部成员的投稿共同收录；完成状态只属于你自己。建议日期可留空。</p></div>${button('<span class="button-plus">+</span>提交日历谜题', 'addCalendarPuzzleButton')}</section><nav class="calendar-view-switch" aria-label="日历视图"><a class="${pending ? '' : 'active'}" href="#calendar">全部投稿 <span>${state.calendarPuzzles.length}</span></a><a class="${pending ? 'active' : ''}" href="#pending">我的未完成 <span>${state.calendarPuzzles.filter((puzzle) => !puzzle.completed).length}</span></a></nav><section class="calendar-toolbar"><div class="section-title-group"><h2>${pending ? '待你解题' : '全部日历谜题'}</h2><span class="count-badge">${String(puzzles.length).padStart(2, '0')}</span></div><label class="calendar-sort-label" for="calendarSort">排序</label><select id="calendarSort" aria-label="日历谜题排序"><option value="date" ${state.calendarSort === 'date' ? 'selected' : ''}>建议日期</option><option value="newest" ${state.calendarSort === 'newest' ? 'selected' : ''}>最近提交</option></select></section><div class="calendar-list">${puzzles.length ? rows : emptyState}</div></div>`;
 }
 function renderRules() {
   const rules = state.rules;
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则管理<span class="heading-period">.</span></h1><p class="page-description">统一维护中英文规则、分类和变体来源。</p></div>${button('<span class="button-plus">+</span>新建规则', 'addRuleButton')}</section><div class="rule-catalog">${rules.length ? rules.map((rule) => `<article class="rule-card"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category)}</span><h2>${esc(rule.titleZh)} <small>${esc(rule.titleEn)}</small></h2></div>${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}</div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rules.find((item) => String(item.id) === String(rule.baseRuleId))?.titleZh || '原始规则')}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></article>`).join('') : '<div class="empty-state">规则目录还没有内容。新建规则后即可用于题库或日历提交。</div>'}</div></div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则管理<span class="heading-period">.</span></h1><p class="page-description">统一维护中英文规则、分类和变体来源。</p></div>${button('<span class="button-plus">+</span>新建规则', 'addRuleButton')}</section><div class="rule-catalog">${rules.length ? rules.map((rule) => `<article class="rule-card"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category)}</span><h2>${esc(rule.titleZh)} <small>${esc(rule.titleEn)}</small></h2></div>${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}</div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rules.find((item) => String(item.id) === String(rule.baseRuleId))?.titleZh || '原始规则')}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></article>`).join('') : '<div class="empty-state">规则目录还没有内容。新建规则后即可用于日历投稿。</div>'}</div></div>`;
 }
 function clauseMarkup(clauses = []) { return `<ol class="rule-clauses">${clauses.map((clause) => `<li>${esc(clause)}</li>`).join('')}</ol>`; }
 
@@ -88,7 +123,9 @@ function renderPuzzlePage(number, scope = 'library') {
   const rule = puzzle.rule;
   const ruleSection = rule ? `<details open><summary>${esc(rule.titleZh)} <span class="muted">${esc(rule.titleEn || '')}</span></summary>${rule.isVariant ? `<p class="rule-base">变体自：${esc(rule.baseRuleTitleZh || '原始规则')}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></details>` : `<details><summary>查看题目规则</summary><p>${esc(puzzle.rules || '暂未提供规则。')}</p></details>`;
   const dateControl = isCalendar && String(puzzle.submittedBy?.id) === String(state.user?.id) ? `<div class="detail-block"><h3>建议日期</h3><label class="inline-date-label" for="suggestedDateEdit">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '尚未安排'}</label><input id="suggestedDateEdit" type="date" value="${esc(puzzle.suggestedDate || '')}" /><button class="button button-light date-save-button" id="saveSuggestedDateButton" type="button">保存日期</button></div>` : '';
-  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? 'calendar' : 'library'}">← 返回${isCalendar ? '谜题日历' : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 <a href="#authors">${esc(puzzle.author || puzzle.submittedBy?.name || '未知作者')}</a> 发布　·　${puzzle.votes} 位解题者评分${isCalendar ? `　·　建议日期 ${esc(puzzle.suggestedDate || '未定')}` : ''}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : ''}</div></section><section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div><div class="puzzle-open-actions">${puzzle.inputMode === 'blank' ? '<span class="muted">这是一个内置填空题</span>' : '<span class="muted">外部题目通过上方工具按钮在新标签页打开</span>'}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${dateControl}<div class="detail-block record-panel"><h3>ANSWER RECORD</h3><p class="record-help">完成题目后，分别评价逻辑难度、通灵难度和喜爱程度。</p><button class="button ${puzzle.completed ? 'button-dark' : 'button-light'}" id="completePuzzleButton" type="button">${puzzle.completed ? '✓ 已完成 · 修改评分' : '标记为已完成'}</button>${hasRating ? `<div class="submitted-rating"><span>我的评分</span>${ratingMarkup(puzzle.userRating, 1)}</div>` : ''}</div>${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section></div>`;
+  const authorName = puzzle.author || puzzle.submittedBy?.name || '未知作者';
+  const authorLabel = isCalendar ? esc(authorName) : `<a href="#authors">${esc(authorName)}</a>`;
+  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? 'calendar' : 'library'}">← 返回${isCalendar ? '谜题日历' : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 ${authorLabel} 发布　·　${puzzle.votes} 位解题者评分${isCalendar ? `　·　建议日期 ${esc(puzzle.suggestedDate || '未定')}` : ''}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : ''}</div></section><section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div><div class="puzzle-open-actions">${puzzle.inputMode === 'blank' ? '<span class="muted">这是一个内置填空题</span>' : '<span class="muted">外部题目通过上方工具按钮在新标签页打开</span>'}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${dateControl}<div class="detail-block record-panel"><h3>ANSWER RECORD</h3><p class="record-help">完成题目后，分别评价逻辑难度、通灵难度和喜爱程度。</p><button class="button ${puzzle.completed ? 'button-dark' : 'button-light'}" id="completePuzzleButton" type="button">${puzzle.completed ? '✓ 已完成 · 修改评分' : '标记为已完成'}</button>${hasRating ? `<div class="submitted-rating"><span>我的评分</span>${ratingMarkup(puzzle.userRating, 1)}</div>` : ''}</div>${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section></div>`;
 }
 
 function renderPuzzleOpenTools(puzzle) {
@@ -111,7 +148,7 @@ function renderEmbed(puzzle) {
 
 function isSupportedPuzzleUrl(value) { return parseTrustedPuzzleUrl(value) !== null; }
 
-function openRating(number, scope = 'library') { const isCalendar = scope === 'calendar'; const puzzles = isCalendar ? state.calendarPuzzles : state.puzzles; const puzzle = puzzles.find((item) => Number(item.number) === Number(number)); if (!puzzle) return; const current = puzzle.userRating || [3, 3, 3]; openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`); ['logic', 'intuition', 'love'].forEach((key) => { const input = document.querySelector(`#${key}Rating`); const output = document.querySelector(`#${key}Value`); input.addEventListener('input', () => { output.textContent = input.value; }); }); document.querySelector('#submitRatingButton').addEventListener('click', async () => { const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value)); try { const path = isCalendar ? `/api/calendar/puzzles/${number}/complete-rating` : `/api/puzzles/${number}/complete-rating`; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) }); if (isCalendar) state.calendarPuzzles = data.puzzles.map(normalizePuzzle); else applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('完成记录已保存，平均评分已更新'); } catch (error) { showToast(error.message); } }); }
+function openRating(number, scope = 'library') { const isCalendar = scope === 'calendar'; const puzzles = isCalendar ? state.calendarPuzzles : state.puzzles; const puzzle = puzzles.find((item) => Number(item.number) === Number(number)); if (!puzzle) return; const current = puzzle.userRating || [3, 3, 3]; openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`); ['logic', 'intuition', 'love'].forEach((key) => { const input = document.querySelector(`#${key}Rating`); const output = document.querySelector(`#${key}Value`); input.addEventListener('input', () => { output.textContent = input.value; }); }); document.querySelector('#submitRatingButton').addEventListener('click', async () => { const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value)); const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const path = isCalendar ? `/api/calendar/puzzles/${number}/complete-rating` : `/api/puzzles/${number}/complete-rating`; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) }); if (isCalendar) state.calendarPuzzles = data.puzzles.map(normalizePuzzle); else applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('完成记录已保存，平均评分已更新'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
 function bindLibrary() { document.querySelector('#addPuzzleButton')?.addEventListener('click', openAddPuzzle); document.querySelector('#filterButton')?.addEventListener('click', () => { const row = document.querySelector('#filterRow'); row.hidden = !row.hidden; }); document.querySelectorAll('.filter-pill').forEach((button) => button.addEventListener('click', () => { state.filter = button.dataset.filter; state.visible = 6; renderRoute(); })); document.querySelectorAll('.segment').forEach((button) => button.addEventListener('click', () => { state.sort = button.dataset.sort; renderRoute(); })); document.querySelector('#loadMoreButton')?.addEventListener('click', () => { state.visible = Math.min(state.visible + 2, filteredPuzzles().length); renderRoute(); showToast('已加载更多题目'); }); document.querySelector('#noticeButton')?.addEventListener('click', () => showToast('公告详情将在公告模块接入后开放')); }
 function openAddPuzzle(scope = 'library', draft = {}) {
   const options = state.rules.map((rule) => `<option value="${esc(rule.id)}" ${String(draft.ruleId || '') === String(rule.id) ? 'selected' : ''}>${esc(rule.titleZh)} · ${esc(rule.titleEn)}</option>`).join('');
@@ -126,12 +163,13 @@ function openAddPuzzle(scope = 'library', draft = {}) {
     if (mode === 'external' && !isSupportedPuzzleUrl(url)) { document.querySelector('#submissionError').textContent = '外部题目必须使用受支持的 puzz.link、Penpa+ 或同类工具链接。'; return; }
     const input = { title, ruleId, type: mode === 'blank' ? '填空题' : '逻辑题', author: document.querySelector('#newPuzzleAuthor').value.trim() || state.user.name, source: mode === 'blank' ? '填空题' : getPuzzleSource(url), url, inputMode: mode, answer: document.querySelector('#newPuzzleAnswer').value.trim(), note: document.querySelector('#newPuzzleNote').value.trim() };
     if (isCalendar) input.suggestedDate = document.querySelector('#newPuzzleDate').value || null;
+    const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const errorNode = document.querySelector('#submissionError');
     try {
       const path = isCalendar ? '/api/calendar/puzzles' : '/api/puzzles'; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify(input) });
       if (isCalendar) { state.calendarPuzzles = data.puzzles.map(normalizePuzzle); const puzzle = normalizePuzzle(data.puzzle || state.calendarPuzzles.find((item) => item.number === Math.max(...state.calendarPuzzles.map((item) => item.number)))); closeModal(); window.location.hash = `#calendar-puzzle-${puzzle.number}`; }
       else { applyPuzzleData(data.puzzles); const newest = Math.max(...state.puzzles.map((puzzle) => puzzle.number)); closeModal(); window.location.hash = `#puzzle-${newest}`; }
       showToast('题目已创建');
-    } catch (error) { document.querySelector('#submissionError').textContent = error.message; }
+    } catch (error) { if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message; }
   });
 }
 function captureSubmissionDraft() { return { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '', suggestedDate: document.querySelector('#newPuzzleDate')?.value || '' }; }
@@ -142,19 +180,20 @@ function openRuleEditor({ fromSubmission = false, draft = null } = {}) {
   document.querySelector('#saveRuleButton').addEventListener('click', async () => {
     const titleZh = document.querySelector('#ruleTitleZh').value.trim(); const titleEn = document.querySelector('#ruleTitleEn').value.trim(); const category = document.querySelector('#ruleCategory').value; const isVariant = document.querySelector('#ruleIsVariant').checked; const baseRuleId = document.querySelector('#ruleBase').value || null; const rulesZh = document.querySelector('#ruleClausesZh').value.split('\n').map((item) => item.trim()).filter(Boolean); const rulesEn = document.querySelector('#ruleClausesEn').value.split('\n').map((item) => item.trim()).filter(Boolean);
     if (!titleZh || !titleEn || !rulesZh.length || !rulesEn.length || (isVariant && !baseRuleId)) { document.querySelector('#ruleError').textContent = '请填写双语标题与规则；变体必须选择原始规则。'; return; }
+    const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const errorNode = document.querySelector('#ruleError');
     try { const data = await apiRequest('/api/rules', { method: 'POST', body: JSON.stringify({ titleZh, titleEn, category, isVariant, baseRuleId, rulesZh, rulesEn }) }); state.rules = data.rules || [...state.rules, data.rule]; closeModal(); if (fromSubmission) openAddPuzzle(state.submissionDraft?.scope || 'library', { ...(state.submissionDraft?.draft || draft || {}), ruleId: data.rule.id }); else { renderRoute(); showToast('规则已创建'); } state.submissionDraft = null; }
-    catch (error) { document.querySelector('#ruleError').textContent = error.message; }
+    catch (error) { if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message; }
   });
 }
 function bindPuzzle(number, scope = 'library') {
   const isCalendar = scope === 'calendar'; const puzzle = (isCalendar ? state.calendarPuzzles : state.puzzles).find((item) => Number(item.number) === Number(number));
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number, scope));
   document.querySelector('#addTagButton')?.addEventListener('click', () => openTagEditor(number));
-  document.querySelector('#saveSuggestedDateButton')?.addEventListener('click', async () => { try { const suggestedDate = document.querySelector('#suggestedDateEdit').value || null; const data = await apiRequest(`/api/calendar/puzzles/${number}`, { method: 'PATCH', body: JSON.stringify({ suggestedDate }) }); state.calendarPuzzles = data.puzzles.map(normalizePuzzle); renderRoute(); showToast('建议日期已保存'); } catch (error) { showToast(error.message); } });
+  document.querySelector('#saveSuggestedDateButton')?.addEventListener('click', async () => { const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const suggestedDate = document.querySelector('#suggestedDateEdit').value || null; const data = await apiRequest(`/api/calendar/puzzles/${number}`, { method: 'PATCH', body: JSON.stringify({ suggestedDate }) }); state.calendarPuzzles = data.puzzles.map(normalizePuzzle); renderRoute(); showToast('建议日期已保存'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } });
   if (puzzle) bindBlank(puzzle);
   document.querySelector('#commentButton')?.addEventListener('click', () => showToast('留言功能将在账户系统接入后启用'));
 }
-function openTagEditor(number) { openModal(`<p class="modal-eyebrow">PUZZLE TAGS</p><h2 id="modalTitle">添加标签</h2><p class="modal-intro">标签用于题库筛选；题型标签和 Wrong Puzzle、Example Puzzle 等状态标签可以同时存在。</p><label class="form-field"><span>标签名称</span><input id="newTagName" type="text" placeholder="例如：Sudoku" /></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存标签', 'saveTagButton')}</div>`); document.querySelector('#saveTagButton').addEventListener('click', async () => { const tag = document.querySelector('#newTagName').value.trim(); if (!tag) { showToast('请填写标签名称'); return; } try { const data = await apiRequest(`/api/puzzles/${number}/tags`, { method: 'POST', body: JSON.stringify({ tag }) }); applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('标签已保存'); } catch (error) { showToast(error.message); } }); }
+function openTagEditor(number) { openModal(`<p class="modal-eyebrow">PUZZLE TAGS</p><h2 id="modalTitle">添加标签</h2><p class="modal-intro">标签用于题库筛选；题型标签和 Wrong Puzzle、Example Puzzle 等状态标签可以同时存在。</p><label class="form-field"><span>标签名称</span><input id="newTagName" type="text" placeholder="例如：Sudoku" /></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存标签', 'saveTagButton')}</div>`); document.querySelector('#saveTagButton').addEventListener('click', async () => { const tag = document.querySelector('#newTagName').value.trim(); if (!tag) { showToast('请填写标签名称'); return; } const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const data = await apiRequest(`/api/puzzles/${number}/tags`, { method: 'POST', body: JSON.stringify({ tag }) }); applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('标签已保存'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
 function bindBlank(puzzle) { document.querySelector('#checkBlankButton')?.addEventListener('click', () => { const answer = document.querySelector('#blankAnswer').value.trim().toLowerCase(); const expected = String(puzzle.answer || '').toLowerCase(); const result = document.querySelector('#blankResult'); if (!answer) { result.textContent = '请填写答案。'; result.className = 'blank-result error'; } else if (expected && answer === expected) { result.textContent = '答案正确，可以提交完成记录。'; result.className = 'blank-result success'; } else { result.textContent = expected ? '还不正确，再试一次。' : '答案已记录，点击完成后进行评分。'; result.className = 'blank-result'; } }); }
 function bindCalendar() { document.querySelector('#addCalendarPuzzleButton')?.addEventListener('click', () => openAddPuzzle('calendar')); document.querySelector('#emptyCalendarAdd')?.addEventListener('click', () => openAddPuzzle('calendar')); document.querySelector('#calendarSort')?.addEventListener('change', (event) => { state.calendarSort = event.target.value; renderRoute(); }); }
 
@@ -167,36 +206,123 @@ function renderCollectionPage(id) { const collection = state.currentCollection &
 async function loadCollection(id) { if (!state.api) return; try { const data = await apiRequest(`/api/collections/${id}`); state.currentCollection = data.collection; renderRoute(); } catch (error) { showToast(error.message); } }
 function bindCollectionList() { document.querySelector('#newCollectionButton')?.addEventListener('click', () => showToast('题集创建表单将在下一阶段接入')); document.querySelectorAll('a[href^="#collection-"]').forEach((link) => link.addEventListener('click', () => { const id = Number(link.getAttribute('href').split('-')[1]); state.currentCollection = null; loadCollection(id); })); }
 function renderAuthGate() {
-  if (!state.sessionChecked) return '<section class="auth-gate" aria-live="polite"><p class="eyebrow">PUZZLE ARCHIVE</p><h1>正在确认登录状态…</h1><p>私人内容将在会话确认后显示。</p></section>';
+  if (!state.sessionChecked) return '<section class="auth-gate" role="status">正在确认登录状态…</section>';
   if (state.serviceError && !state.user) return `<section class="auth-gate" role="alert"><p class="eyebrow">SERVICE STATUS</p><h1>服务暂不可用</h1><p>${esc(state.serviceError)}</p><button class="button button-dark" type="button" id="retrySessionButton">重试</button></section>`;
-  return `<section class="auth-gate"><p class="eyebrow">TRUSTED MEMBERS</p><h1>谜题数据库<span class="heading-period">.</span></h1><p>此空间仅向受信任成员开放，请使用邀请访问码登录。</p><button class="button button-dark" type="button" id="gateLoginButton">使用邀请码登录</button></section>`;
+  const registering = state.authMode === 'register';
+  const busy = state.authBusy || state.logoutPending;
+  const authStatus = state.logoutPending ? '正在安全退出…' : state.authError;
+  return `<section class="auth-gate auth-page"><div class="auth-brand"><span class="brand-mark">PA</span><span><strong>PuzArchive</strong><small>private puzzle archive</small></span></div><p class="eyebrow">TRUSTED MEMBERS</p><h1>${registering ? '创建成员账号' : '欢迎回来'}<span class="heading-period">.</span></h1><p>${registering ? '同一个邀请码可重复注册不同账号，不会被消耗。这里仅使用用户名和密码。' : '登录后继续浏览成员共同投稿的谜题日历。'}</p><div class="auth-switch" role="group" aria-label="账号操作"><button type="button" data-auth-mode="login" aria-pressed="${!registering}" ${busy ? 'disabled' : ''}>登录</button><button type="button" data-auth-mode="register" aria-pressed="${registering}" ${busy ? 'disabled' : ''}>注册</button></div><form id="authForm" novalidate>${registering ? '<label class="form-field"><span>邀请码</span><input id="authInviteCode" name="inviteCode" type="password" autocomplete="off" required /></label>' : ''}<label class="form-field"><span>用户名</span><input id="authUsername" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label><label class="form-field"><span>密码</span><input id="authPassword" name="password" type="password" autocomplete="${registering ? 'new-password' : 'current-password'}" required /></label>${registering ? '<label class="form-field"><span>确认密码</span><input id="authPasswordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" required /></label>' : ''}<div class="auth-error" id="authError" role="alert" aria-live="polite">${esc(authStatus)}</div><button class="button button-dark auth-submit" type="submit" ${busy ? 'disabled' : ''}>${state.logoutPending ? '正在退出…' : state.authBusy ? '处理中…' : registering ? '使用邀请码注册' : '登录'}</button></form><p class="auth-footnote">同一个邀请码可重复注册不同账号，不会被消耗。</p></section>`;
 }
 function renderRoute() {
-  const route = getRoute(); setBreadcrumb(route.name);
-  document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc((state.user.name || '?').slice(0, 1))}</span><span class="profile-copy"><strong>${esc(state.user.name)}</strong><small>Trusted member · 退出</small></span><span class="profile-more">···</span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>访客</strong><small>未登录</small></span><span class="profile-more">···</span>';
+  document.body.dataset.authState = !state.sessionChecked ? 'checking' : state.user ? 'authenticated' : 'unauthenticated';
+  const route = state.user ? normalizeAuthenticatedRoute() : getRoute();
+  setBreadcrumb(route.name);
+  const profileName = state.user?.username || state.user?.name || '?';
+  document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号 · 退出</small></span><span class="profile-more">···</span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span><span class="profile-more">···</span>';
   const authButton = document.querySelector('#loginButton');
   authButton.classList.toggle('is-logout', Boolean(state.user));
-  authButton.innerHTML = state.user ? '退出 <span>↗</span>' : '登录 <span>↗</span>';
-  authButton.setAttribute('aria-label', state.user ? '退出登录' : '使用邀请码登录');
+  authButton.innerHTML = '退出 <span>↗</span>';
+  authButton.setAttribute('aria-label', '退出登录');
   document.querySelector('#syncStatusText').textContent = state.user ? '私人数据库已连接' : state.serviceError ? '服务不可用' : '等待登录';
-  if (!state.sessionChecked || !state.user) { app.innerHTML = renderAuthGate(); document.querySelector('#retrySessionButton')?.addEventListener('click', bootstrapDatabase); document.querySelector('#gateLoginButton')?.addEventListener('click', openLogin); return; }
+  if (!state.sessionChecked || !state.user) { app.innerHTML = renderAuthGate(); document.querySelector('#retrySessionButton')?.addEventListener('click', bootstrapDatabase); bindAuthGate(); return; }
   if (state.privateLoading) { app.innerHTML = '<div class="page-wrap-inner"><div class="empty-state" role="status">正在加载私人数据…</div></div>'; return; }
   if (state.serviceError) { app.innerHTML = `<div class="page-wrap-inner"><div class="error-state" role="alert"><strong>私人数据暂时无法加载</strong><p>${esc(state.serviceError)}</p><button class="button button-light" type="button" id="retryPrivateButton">重试</button></div></div>`; document.querySelector('#retryPrivateButton')?.addEventListener('click', loadPrivateData); return; }
-  app.innerHTML = route.name === 'home' ? renderHome() : route.name === 'library' ? renderLibrary() : route.name === 'calendar' ? renderCalendar() : route.name === 'rules' ? renderRules() : route.name === 'collections' ? renderCollections() : route.name === 'collection' ? renderCollectionPage(route.id) : route.name === 'files' ? renderFiles() : route.name === 'records' ? renderRecords() : route.name === 'authors' ? renderAuthors() : route.name === 'puzzle' ? renderPuzzlePage(route.number) : route.name === 'calendar-puzzle' ? renderPuzzlePage(route.number, 'calendar') : renderHome();
-  if (route.name === 'library') bindLibrary(); if (route.name === 'calendar') bindCalendar(); if (route.name === 'rules') document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor());
-  if (route.name === 'collections') bindCollectionList(); if (route.name === 'collection' && !state.currentCollection) loadCollection(route.id);
-  if (route.name === 'puzzle') bindPuzzle(route.number, 'library'); if (route.name === 'calendar-puzzle') bindPuzzle(route.number, 'calendar'); if (route.name === 'files') bindFiles();
-  document.querySelector('#noticeButton')?.addEventListener('click', () => showToast('公告详情将在公告模块接入后开放'));
-  document.querySelector('#profileButton')?.addEventListener('click', logout);
+  app.innerHTML = route.name === 'rules' ? renderRules() : route.name === 'calendar-puzzle' ? renderPuzzlePage(route.number, 'calendar') : renderCalendar(route.name === 'pending');
+  if (['calendar', 'pending'].includes(route.name)) bindCalendar();
+  if (route.name === 'rules') document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor());
+  if (route.name === 'calendar-puzzle') bindPuzzle(route.number, 'calendar');
 }
 function bindFiles() { document.querySelector('#newFolderButton')?.addEventListener('click', openNewFolder); document.querySelector('#newFolderCard')?.addEventListener('click', openNewFolder); document.querySelectorAll('[data-folder]').forEach((folder) => folder.addEventListener('click', () => { state.filePath = ['全部文件', folder.querySelector('strong').textContent]; renderRoute(); showToast(`已打开文件夹：${state.filePath[1]}`); })); document.querySelector('[data-file-home]')?.addEventListener('click', () => { state.filePath = ['全部文件']; renderRoute(); }); document.querySelector('#sortFilesButton')?.addEventListener('click', (event) => { event.currentTarget.textContent = event.currentTarget.textContent === '按最近更新' ? '按名称排序' : '按最近更新'; showToast('文件排序方式已切换'); }); }
 function openNewFolder() { openModal(`<p class="modal-eyebrow">FILE MANAGER</p><h2 id="modalTitle">新建文件夹</h2><p class="modal-intro">文件夹可以表示来源、年份或题集，并且可以继续嵌套。</p><label class="form-field"><span>文件夹名称</span><input id="newFolderName" type="text" placeholder="例如：2026" /></label><label class="form-field"><span>上级文件夹（可选）</span><select id="newFolderParent"><option value="">根目录</option>${state.folders.map((folder) => `<option value="${esc(folder.id)}">${esc(folder.name)}</option>`).join('')}</select></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('创建文件夹', 'createFolderButton')}</div>`); document.querySelector('#createFolderButton').addEventListener('click', async () => { const name = document.querySelector('#newFolderName').value.trim(); if (!name) { showToast('请填写文件夹名称'); return; } const parent = document.querySelector('#newFolderParent').value || null; try { const data = await apiRequest('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId: parent }) }); state.folders = data.folders.map((folder) => ({ id: String(folder.id), name: folder.name, count: folder.count, parent: folder.parent })); closeModal(); renderRoute(); showToast(`文件夹「${name}」已创建`); } catch (error) { showToast(error.message); } }); }
 
-document.querySelector('#searchButton').addEventListener('click', () => { const search = window.prompt('搜索题目、作者或标签'); if (search) { const match = state.puzzles.find((puzzle) => `${puzzle.title} ${puzzle.author} ${puzzle.tags.join(' ')}`.toLowerCase().includes(search.toLowerCase())); window.location.hash = match ? `#puzzle-${match.number}` : '#library'; showToast(match ? `已找到「${match.title}」` : `没有找到「${search}」`); } });
-document.querySelector('#notificationButton').addEventListener('click', () => showToast('暂无新通知'));
-function openLogin() { openModal(`<p class="modal-eyebrow">TRUSTED MEMBERS</p><h2 id="modalTitle">使用邀请码登录</h2><p class="modal-intro">请输入管理员发给你的邀请访问码。</p><form id="loginForm"><label class="form-field"><span>邀请访问码</span><input id="accessCode" type="password" autocomplete="current-password" required aria-label="邀请访问码" /></label><div class="modal-error" id="loginError" role="alert"></div><div class="modal-footer"><button class="button button-dark" type="submit">登录</button></div></form>`); document.querySelector('#loginForm').addEventListener('submit', async (event) => { event.preventDefault(); const accessCode = document.querySelector('#accessCode').value; try { const data = await apiRequest('/api/session', { method: 'POST', body: JSON.stringify({ accessCode }) }); state.user = data.user; state.sessionChecked = true; closeModal(); await loadPrivateData(); showToast(`欢迎，${state.user.name}`); } catch (error) { const errorNode = document.querySelector('#loginError'); if (errorNode) errorNode.textContent = error.message || '登录失败，请检查访问码。'; } }); }
-async function logout() { if (!state.user) { openLogin(); return; } try { await apiRequest('/api/session', { method: 'DELETE' }); clearPrivateState(); state.sessionChecked = true; renderRoute(); showToast('已退出登录'); } catch (error) { showToast(error.message || '退出登录失败'); } }
-document.querySelector('#loginButton').addEventListener('click', () => state.user ? logout() : openLogin());
+function bindAuthGate() {
+  document.querySelectorAll('[data-auth-mode]').forEach((button) => button.addEventListener('click', () => {
+    if (state.authBusy || state.logoutPending || state.authMode === button.dataset.authMode) return;
+    state.authEpoch += 1;
+    state.authMode = button.dataset.authMode;
+    state.authError = '';
+    renderRoute();
+    document.querySelector('#authUsername')?.focus();
+  }));
+  document.querySelector('#authForm')?.addEventListener('submit', submitAuthForm);
+}
+function authFieldError(username, password, confirmPassword, inviteCode) {
+  if (!username) return '请输入用户名。';
+  if (!normalizeUsername(username)) return '用户名需为 2–32 个字符，可使用字母、数字、下划线和连字符。';
+  if (state.authMode === 'register' && !inviteCode) return '请输入邀请码。';
+  if (state.authMode === 'register' && !validateAccountPassword(password)) return '密码需为 12–128 个字符，最多 512 字节。';
+  if (!password) return '请输入密码。';
+  if (state.authMode === 'register' && password !== confirmPassword) return '两次输入的密码不一致。';
+  return '';
+}
+async function submitAuthForm(event) {
+  event.preventDefault();
+  if (state.authBusy || state.logoutPending) return;
+  const authAttempt = ++state.authEpoch;
+  const attemptedMode = state.authMode;
+  const rawUsername = document.querySelector('#authUsername').value;
+  const username = normalizeUsername(rawUsername)?.username || rawUsername.normalize('NFKC');
+  const password = document.querySelector('#authPassword').value;
+  const confirmPassword = document.querySelector('#authPasswordConfirm')?.value || '';
+  const inviteCode = document.querySelector('#authInviteCode')?.value || '';
+  const validationError = authFieldError(username, password, confirmPassword, inviteCode);
+  const errorNode = document.querySelector('#authError');
+  if (validationError) { errorNode.textContent = validationError; return; }
+  state.authBusy = true;
+  state.authError = '';
+  const submitButton = document.querySelector('.auth-submit');
+  submitButton.disabled = true;
+  submitButton.textContent = state.authMode === 'register' ? '正在注册…' : '正在登录…';
+  try {
+    const registering = attemptedMode === 'register';
+    const data = await apiRequest(registering ? '/api/register' : '/api/session', {
+      method: 'POST',
+      body: JSON.stringify(registering ? { inviteCode, username, password } : { username, password })
+    });
+    if (authAttempt !== state.authEpoch || attemptedMode !== state.authMode || state.user) return;
+    if (!data.user) throw new Error('服务器没有返回账号信息，请重试。');
+    state.sessionEpoch += 1;
+    state.user = data.user;
+    state.sessionChecked = true;
+    state.authBusy = false;
+    state.authError = '';
+    state.serviceError = '';
+    normalizeAuthenticatedRoute();
+    renderRoute();
+    const sessionEpoch = state.sessionEpoch;
+    const welcomeName = state.user.username || state.user.name;
+    await loadPrivateData();
+    if (state.sessionEpoch === sessionEpoch && state.user) showToast(`欢迎，${welcomeName}`);
+  } catch (error) {
+    if (authAttempt !== state.authEpoch || attemptedMode !== state.authMode || state.user) return;
+    state.authBusy = false;
+    state.authError = error.message || '操作失败，请检查输入后重试。';
+    if (errorNode.isConnected) errorNode.textContent = state.authError;
+    if (submitButton.isConnected) {
+      submitButton.disabled = false;
+      submitButton.textContent = state.authMode === 'register' ? '使用邀请码注册' : '登录';
+    }
+  }
+}
+async function logout() {
+  if (!state.user || state.logoutPending) return;
+  state.logoutPending = true;
+  const request = apiRequest('/api/session', { method: 'DELETE' });
+  clearPrivateState();
+  state.sessionChecked = true;
+  state.authMode = 'login';
+  renderRoute();
+  try {
+    await request;
+  } catch {
+    state.authError = '退出请求未能完成。请重新登录后再试。';
+  } finally {
+    state.logoutPending = false;
+    renderRoute();
+  }
+}
+document.querySelector('#loginButton').addEventListener('click', logout);
+document.querySelector('#profileButton').addEventListener('click', logout);
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
 window.addEventListener('hashchange', renderRoute);
 renderRoute();

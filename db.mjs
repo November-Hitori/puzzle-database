@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
@@ -97,7 +98,22 @@ database.exec(`
     user_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
   );
-  CREATE TABLE IF NOT EXISTS trusted_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, access_code_hash TEXT NOT NULL DEFAULT '');
+  CREATE TABLE IF NOT EXISTS trusted_users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    access_code_hash TEXT NOT NULL DEFAULT '',
+    username TEXT,
+    username_key TEXT,
+    password_hash TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1))
+  );
+  CREATE TABLE IF NOT EXISTS auth_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  CREATE TABLE IF NOT EXISTS registration_gate (
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    token_hash TEXT NOT NULL UNIQUE,
+    pending_legacy_user_id TEXT REFERENCES trusted_users(id),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Additive migration for databases created by the original prototype.
@@ -107,6 +123,10 @@ for (const [name, definition] of [['scope', "TEXT NOT NULL DEFAULT 'public'"], [
 }
 const trustedUserColumns = new Set(database.prepare('PRAGMA table_info(trusted_users)').all().map((column)=>column.name));
 if (!trustedUserColumns.has('access_code_hash')) database.exec("ALTER TABLE trusted_users ADD COLUMN access_code_hash TEXT NOT NULL DEFAULT ''");
+for (const [name, definition] of [['username', 'TEXT'], ['username_key', 'TEXT'], ['password_hash', 'TEXT'], ['is_active', 'INTEGER NOT NULL DEFAULT 1']]) {
+  if (!trustedUserColumns.has(name)) database.exec(`ALTER TABLE trusted_users ADD COLUMN ${name} ${definition}`);
+}
+database.exec("CREATE UNIQUE INDEX IF NOT EXISTS trusted_users_username_key ON trusted_users(username_key) WHERE username_key IS NOT NULL");
 
 const puzzleCount = database.prepare('SELECT COUNT(*) AS count FROM puzzles').get().count;
 if (puzzleCount === 0) {
@@ -327,10 +347,105 @@ export function retainTrustedUsers(ids) {
   database.prepare(`DELETE FROM member_sessions WHERE user_id NOT IN (${placeholders})`).run(...ids);
   database.prepare(`DELETE FROM trusted_users WHERE id NOT IN (${placeholders})`).run(...ids);
 }
+export function authBootstrapComplete() {
+  return Boolean(database.prepare('SELECT version FROM auth_schema_migrations WHERE version=1').get());
+}
+export function bootstrapLegacyAuth(members) {
+  if (members.length!==1) throw new Error('Auth migration requires exactly one current legacy member as the shared registration-code source');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    if (authBootstrapComplete()) {
+      database.exec('COMMIT');
+      return false;
+    }
+    const upsert = database.prepare(`INSERT INTO trusted_users(id,name,access_code_hash)
+      VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,access_code_hash=excluded.access_code_hash`);
+    for (const member of members) upsert.run(member.id,member.name,member.accessCodeHash);
+    if (members.length) database.prepare(`INSERT OR IGNORE INTO registration_gate(id,token_hash,pending_legacy_user_id)
+      VALUES (1,?,?)`).run(members[0].accessCodeHash,members[0].id);
+    if (members.length) {
+      const placeholders=members.map(()=>'?').join(',');
+      database.prepare(`UPDATE trusted_users SET is_active=0 WHERE id NOT IN (${placeholders})`).run(...members.map((member)=>member.id));
+    } else database.prepare('UPDATE trusted_users SET is_active=0').run();
+    database.prepare('UPDATE trusted_users SET access_code_hash=\'\'').run();
+    database.prepare('DELETE FROM member_sessions').run();
+    database.prepare('INSERT INTO auth_schema_migrations(version) VALUES (1)').run();
+    database.exec('COMMIT');
+    return true;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+export function findUserByUsernameKey(usernameKey) {
+  const user=database.prepare(`SELECT id,name,username,username_key,password_hash,is_active
+    FROM trusted_users WHERE username_key=?`).get(usernameKey);
+  return user?{id:user.id,name:user.name,username:user.username,usernameKey:user.username_key,passwordHash:user.password_hash,active:Boolean(user.is_active)}:null;
+}
+export function registerAccountWithGate(gateTokenHash,username,usernameKey,passwordHash,sessionTokenHash,expiresAt) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const gate=database.prepare('SELECT token_hash,pending_legacy_user_id FROM registration_gate WHERE id=1').get();
+    let validGate=false;
+    if (gate && /^[a-f0-9]{64}$/.test(gate.token_hash) && /^[a-f0-9]{64}$/.test(gateTokenHash)) {
+      validGate=timingSafeEqual(Buffer.from(gate.token_hash,'hex'),Buffer.from(gateTokenHash,'hex'));
+    }
+    if (!validGate) { database.exec('ROLLBACK'); return {error:'gate'}; }
+    if (database.prepare('SELECT 1 FROM trusted_users WHERE username_key=?').get(usernameKey)) {
+      database.exec('ROLLBACK');
+      return {error:'username'};
+    }
+    let userId=randomUUID(), userName=username;
+    if (gate.pending_legacy_user_id) {
+      userId=gate.pending_legacy_user_id;
+      const legacyUser=database.prepare(`SELECT name FROM trusted_users WHERE id=? AND is_active=1
+        AND username_key IS NULL AND password_hash IS NULL`).get(userId);
+      if (!legacyUser) { database.exec('ROLLBACK'); return {error:'gate'}; }
+      userName=legacyUser.name;
+      const claim=database.prepare(`UPDATE trusted_users SET username=?,username_key=?,password_hash=?
+        WHERE id=? AND username_key IS NULL AND password_hash IS NULL AND is_active=1`)
+        .run(username,usernameKey,passwordHash,userId);
+      if (claim.changes!==1) { database.exec('ROLLBACK'); return {error:'gate'}; }
+      database.prepare('UPDATE registration_gate SET pending_legacy_user_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=1').run();
+    } else {
+      database.prepare(`INSERT INTO trusted_users(id,name,username,username_key,password_hash,is_active)
+        VALUES (?,?,?,?,?,1)`).run(userId,userName,username,usernameKey,passwordHash);
+    }
+    database.prepare('INSERT INTO member_sessions(token_hash,user_id,expires_at) VALUES (?,?,?)').run(sessionTokenHash,userId,expiresAt);
+    database.exec('COMMIT');
+    return {user:{id:userId,name:userName,username}};
+  } catch (error) {
+    database.exec('ROLLBACK');
+    if (String(error.code||'').startsWith('SQLITE_CONSTRAINT')) return {error:'username'};
+    throw error;
+  }
+}
+export function setRegistrationGate(tokenHash) {
+  database.prepare(`INSERT INTO registration_gate(id,token_hash) VALUES (1,?)
+    ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,updated_at=CURRENT_TIMESTAMP`).run(tokenHash);
+}
+export function disableRegistrationGate() {
+  return database.prepare("UPDATE registration_gate SET token_hash='',updated_at=CURRENT_TIMESTAMP WHERE id=1").run().changes>0;
+}
+export function revokeAccount(usernameKey) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const user=database.prepare('SELECT id FROM trusted_users WHERE username_key=?').get(usernameKey);
+    if (!user) { database.exec('ROLLBACK'); return false; }
+    database.prepare('UPDATE trusted_users SET is_active=0 WHERE id=?').run(user.id);
+    database.prepare('DELETE FROM member_sessions WHERE user_id=?').run(user.id);
+    database.exec('COMMIT');
+    return true;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
 export function createSession(tokenHash,userId,expiresAt) { database.prepare('INSERT INTO member_sessions(token_hash,user_id,expires_at) VALUES (?,?,?)').run(tokenHash,userId,expiresAt); }
 export function findSession(tokenHash,now=Date.now()) {
-  const session=database.prepare(`SELECT u.id,u.name,s.expires_at FROM member_sessions s JOIN trusted_users u ON u.id=s.user_id WHERE s.token_hash=?`).get(tokenHash);
-  if (!session || session.expires_at <= now) { database.prepare('DELETE FROM member_sessions WHERE token_hash=?').run(tokenHash); return null; }
-  return {id:session.id,name:session.name};
+  const session=database.prepare(`SELECT u.id,u.name,u.username,s.expires_at,u.is_active,u.password_hash
+    FROM member_sessions s JOIN trusted_users u ON u.id=s.user_id WHERE s.token_hash=?`).get(tokenHash);
+  if (!session || session.expires_at <= now || !session.is_active || !session.username || !session.password_hash) { database.prepare('DELETE FROM member_sessions WHERE token_hash=?').run(tokenHash); return null; }
+  return {id:session.id,name:session.name,username:session.username};
 }
 export function deleteSession(tokenHash) { database.prepare('DELETE FROM member_sessions WHERE token_hash=?').run(tokenHash); }

@@ -39,7 +39,24 @@ The check runs SQLite `integrity_check`, verifies member IDs against SQLite's tr
 
 ## Administration
 
-The first member login uses the same trusted member identity and invitation code as the migrated local archive. The secret member configuration is at `/var/lib/puzarchive/trusted-users.json`; do not print it, add it to a shell command, or commit it. Add, remove, or rotate members by editing that file with a secure editor and restarting `puzarchive.service`; removal or rotation invalidates existing sessions.
+### Membership and accounts
+
+On the first startup with the account-auth release, the service migrates the current `/var/lib/puzarchive/trusted-users.json` into SQLite and invalidates legacy invitation-only sessions. The file must contain exactly one configured member; startup fails clearly if it contains more. The first successful registration claims that member's UUID and display name, preserving its existing puzzle, completion, and rating history. Later registrations get new identities. The shared registration code is reusable and is stored only as a hash in SQLite. After migration the JSON file is a private backup, not an account or registration-control interface; editing it no longer adds, removes, or rotates accounts or the code.
+
+Login uses a unique username and password; no email verification is required. Usernames are NFKC-normalized and case-insensitive for uniqueness. Passwords require 12–128 Unicode characters (maximum 512 UTF-8 bytes) and are stored as salted scrypt hashes. Sessions are private HttpOnly cookies.
+
+Run account administration locally on the server. These commands never put a registration code in shell arguments; rotation prints a newly generated shared code once, which must be conveyed privately:
+
+```sh
+sudo -u puzarchive env PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite \
+  /opt/puzarchive/runtime/bin/node /opt/puzarchive/app/deploy/accounts.mjs rotate-registration-code
+sudo -u puzarchive env PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite \
+  /opt/puzarchive/runtime/bin/node /opt/puzarchive/app/deploy/accounts.mjs disable-registration
+sudo -u puzarchive env PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite \
+  /opt/puzarchive/runtime/bin/node /opt/puzarchive/app/deploy/accounts.mjs revoke-account USERNAME
+```
+
+Rotating the shared code affects only future registrations; existing account credentials and sessions are unchanged. Disabling registration stops new registrations but does not revoke existing accounts. Revoking an account disables it and deletes its sessions while preserving puzzle history. Because the shared code remains available to its holders, preventing a revoked person from creating another account also requires rotating or disabling registration. Start the service once after upgrade before running these commands so the one-time migration can establish the pending legacy identity claim.
 
 Inspect the service and loopback listener with:
 

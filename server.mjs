@@ -3,14 +3,16 @@ import fs from 'node:fs';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   addCalendarPuzzle, addFolder, addPuzzle, addPuzzleTag, addRule, calendarPuzzleExists,
-  completeAndRate, createSession, deleteSession, findSession, getCalendarPuzzle,
+  authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
-  getRules, getTags, retainTrustedUsers, updateCalendarSuggestedDate, upsertTrustedUser
+  getRules, getTags, registerAccountWithGate, updateCalendarSuggestedDate
 } from './db.mjs';
 import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
+import { hashPassword, verifyPassword } from './password-hash.mjs';
+import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir,'data');
@@ -18,7 +20,7 @@ const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'truste
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
 const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs']);
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs']);
 const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
@@ -34,8 +36,18 @@ function pruneLoginAttempts(now) {
   }
   while (loginAttempts.size>=LOGIN_ATTEMPT_IP_LIMIT) loginAttempts.delete(loginAttempts.keys().next().value);
 }
+function reserveLoginAttempt(address,now=Date.now()) {
+  pruneLoginAttempts(now);
+  const recent=loginAttempts.get(address)||[];
+  if (recent.length>=12) return false;
+  recent.push(now);
+  loginAttempts.set(address,recent);
+  return true;
+}
 
-function loadMembers() {
+function migrateLegacyInvites() {
+  const bootstrapComplete=authBootstrapComplete();
+  if (bootstrapComplete) return;
   fs.mkdirSync(path.dirname(usersPath),{recursive:true});
   if (!fs.existsSync(usersPath)) {
     const member={id:randomUUID(),name:'Trusted Member',accessCode:randomBytes(18).toString('base64url')};
@@ -43,29 +55,38 @@ function loadMembers() {
     try { fs.chmodSync(usersPath,0o600); } catch {}
   }
   const parsed=JSON.parse(fs.readFileSync(usersPath,'utf8'));
-  if (!Array.isArray(parsed) || !parsed.length || parsed.some((m)=>!m || typeof m.id!=='string' || !m.id || typeof m.name!=='string' || !m.name.trim() || typeof m.accessCode!=='string' || m.accessCode.length<16)) throw new Error(`Invalid trusted member configuration at ${usersPath}`);
+  if (!Array.isArray(parsed) || parsed.length!==1 || parsed.some((m)=>!m || typeof m.id!=='string' || !m.id || typeof m.name!=='string' || !m.name.trim() || typeof m.accessCode!=='string' || m.accessCode.length<16)) throw new Error(`Expected exactly one bootstrap member with a valid registration code in ${usersPath}`);
   const ids=new Set(),codes=new Set();
+  const seeds=[];
   for (const member of parsed) {
     if (ids.has(member.id)||codes.has(member.accessCode)) throw new Error('Trusted member ids and invitation codes must be unique');
     ids.add(member.id); codes.add(member.accessCode);
-    upsertTrustedUser(member.id,member.name.trim(),createHash('sha256').update(member.accessCode).digest('hex'));
+    seeds.push({id:member.id,name:member.name.trim(),accessCodeHash:createHash('sha256').update(member.accessCode).digest('hex')});
   }
-  retainTrustedUsers([...ids]);
-  return parsed.map((m)=>({...m,name:m.name.trim()}));
+  bootstrapLegacyAuth(seeds);
 }
-const members=loadMembers();
-const codeCandidates=members.map((member)=>({member,hash:createHash('sha256').update(member.accessCode).digest()}));
+migrateLegacyInvites();
 const tokenHash=(token)=>createHash('sha256').update(token).digest('hex');
 const cookies=(request)=>Object.fromEntries(String(request.headers.cookie||'').split(';').map((part)=>part.trim()).filter(Boolean).map((part)=>{const at=part.indexOf('=');return [part.slice(0,at),decodeURIComponent(part.slice(at+1))]}));
+const dummyPasswordHash=hashPassword(randomBytes(32).toString('base64url'));
 function currentUser(request) { const token=cookies(request)[SESSION_COOKIE]; return token ? findSession(tokenHash(token)) : null; }
 function sendJson(response,status,payload,extra={}) {
   response.writeHead(status,{ 'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin',...extra });
   response.end(JSON.stringify(payload));
 }
 async function readJson(request,limit=128*1024) {
-  let body='';
-  for await (const chunk of request) { body+=chunk; if (Buffer.byteLength(body)>limit) throw Object.assign(new Error('request body too large'),{status:413}); }
-  if (!body) return {};
+  const chunks=[];
+  let size=0;
+  for await (const chunk of request) {
+    const bytes=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);
+    size+=bytes.length;
+    if (size>limit) throw Object.assign(new Error('request body too large'),{status:413});
+    chunks.push(bytes);
+  }
+  if (size===0) return {};
+  let body;
+  try { body=new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks,size)); }
+  catch { throw Object.assign(new Error('request body must be UTF-8'),{status:400}); }
   try { const value=JSON.parse(body); if (!value || typeof value!=='object' || Array.isArray(value)) throw new Error(); return value; }
   catch { throw Object.assign(new Error('invalid JSON body'),{status:400}); }
 }
@@ -109,25 +130,56 @@ function validateRule(input) {
 function ensurePublicPuzzle(number) { return Boolean(getPuzzles('scope-check').some((p)=>p.number===number)); }
 function validateRatings(input) { return ['logic','intuition','enjoyment'].every((key)=>Number.isInteger(input[key])&&input[key]>=1&&input[key]<=5); }
 
+function setSessionCookie(request,response,token,trustLoopbackProxy,status,user,maxAge=Math.floor(SESSION_MS/1000)) {
+  const secure=request.socket.encrypted || proxyContext(request,trustLoopbackProxy)?.protocol==='https';
+  const cookie=`${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure?'; Secure':''}`;
+  return sendJson(response,status,{user},{'Set-Cookie':cookie});
+}
+function authBusy(response) { return sendJson(response,503,{error:'authentication service is busy; retry shortly'},{'Retry-After':'2'}); }
+function authAddress(request,trustLoopbackProxy) { return proxyContext(request,trustLoopbackProxy)?.address || request.socket.remoteAddress || 'unknown'; }
+
+async function handleRegistration(request,response,pathname,trustLoopbackProxy) {
+  if (request.method!=='POST' || pathname!=='/api/register') return null;
+  if (!sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
+  const address=authAddress(request,trustLoopbackProxy);
+  if (!reserveLoginAttempt(address)) return sendJson(response,429,{error:'too many authentication attempts'});
+  const input=await readJson(request,16*1024);
+  const normalized=normalizeUsername(input.username);
+  if (!normalized) return sendJson(response,400,{error:'username must be 2–32 letters, numbers, underscores, or hyphens'});
+  if (!validateAccountPassword(input.password)) return sendJson(response,400,{error:'password must be 12–128 characters and at most 512 UTF-8 bytes'});
+  if (typeof input.inviteCode!=='string' || input.inviteCode.length<16 || input.inviteCode.length>256) return sendJson(response,400,{error:'invitation code is required'});
+
+  let passwordHash;
+  try { passwordHash=await hashPassword(input.password); }
+  catch (error) { if (error.code==='PASSWORD_KDF_BUSY') return authBusy(response); throw error; }
+  const token=randomBytes(32).toString('base64url');
+  const result=registerAccountWithGate(tokenHash(input.inviteCode),normalized.username,normalized.key,passwordHash,tokenHash(token),Date.now()+SESSION_MS);
+  if (result.error==='username') return sendJson(response,409,{error:'username is unavailable'});
+  if (result.error) return sendJson(response,400,{error:'registration code is invalid'});
+  loginAttempts.delete(address);
+  return setSessionCookie(request,response,token,trustLoopbackProxy,201,result.user);
+}
+
 async function handleSession(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && pathname==='/api/session') return sendJson(response,200,{user:currentUser(request)});
   if (request.method==='POST' && pathname==='/api/session') {
     if (!sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
-    const address=proxyContext(request,trustLoopbackProxy)?.address || request.socket.remoteAddress || 'unknown', now=Date.now(), attempts=loginAttempts.get(address)||[];
-    const recent=attempts.filter((time)=>now-time<LOGIN_WINDOW_MS);
-    if (recent.length>=12) return sendJson(response,429,{error:'too many login attempts'});
-    const input=await readJson(request,16*1024);
-    if (typeof input.accessCode!=='string'||input.accessCode.length>256) return sendJson(response,400,{error:'accessCode is required'});
-    const supplied=createHash('sha256').update(input.accessCode).digest();
-    let match=null;
-    for (const candidate of codeCandidates) if (timingSafeEqual(candidate.hash,supplied)) match=candidate;
-    if (!match) { pruneLoginAttempts(now); recent.push(now); loginAttempts.set(address,recent); return sendJson(response,401,{error:'invalid invitation code'}); }
+    const address=authAddress(request,trustLoopbackProxy);
+    if (!reserveLoginAttempt(address)) return sendJson(response,429,{error:'too many authentication attempts'});
+    const input=await readJson(request,16*1024), normalized=normalizeUsername(input.username);
+    if (!normalized || !validateAccountPassword(input.password)) return sendJson(response,400,{error:'username and password are required'});
+    const user=findUserByUsernameKey(normalized.key);
+    let passwordHash;
+    if (user?.active && user.passwordHash) passwordHash=user.passwordHash;
+    else passwordHash=await dummyPasswordHash;
+    let matches;
+    try { matches=await verifyPassword(input.password,passwordHash); }
+    catch (error) { if (error.code==='PASSWORD_KDF_BUSY') return authBusy(response); throw error; }
+    if (!user || !user.active || !user.passwordHash || !matches) return sendJson(response,401,{error:'invalid username or password'});
     loginAttempts.delete(address);
     const token=randomBytes(32).toString('base64url'), expires=Date.now()+SESSION_MS;
-    createSession(tokenHash(token),match.member.id,expires);
-    const secure=request.socket.encrypted || proxyContext(request,trustLoopbackProxy)?.protocol==='https';
-    const cookie=`${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_MS/1000)}${secure?'; Secure':''}`;
-    return sendJson(response,200,{user:{id:match.member.id,name:match.member.name}},{'Set-Cookie':cookie});
+    createSession(tokenHash(token),user.id,expires);
+    return setSessionCookie(request,response,token,trustLoopbackProxy,200,{id:user.id,name:user.name,username:user.username});
   }
   if (request.method==='DELETE' && pathname==='/api/session') {
     if (!sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
@@ -139,6 +191,7 @@ async function handleSession(request,response,pathname,trustLoopbackProxy) {
 }
 
 async function handleApi(request,response,pathname,trustLoopbackProxy) {
+  const registrationResult=await handleRegistration(request,response,pathname,trustLoopbackProxy); if (registrationResult!==null) return;
   const sessionResult=await handleSession(request,response,pathname,trustLoopbackProxy); if (sessionResult!==null) return;
   const user=currentUser(request); if (!user) return sendJson(response,401,{error:'authentication required'});
   if (['POST','PATCH','PUT','DELETE'].includes(request.method) && !sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});

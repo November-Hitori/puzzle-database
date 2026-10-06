@@ -146,14 +146,20 @@ button { cursor: pointer; }
 .calendar-toolbar h2 { margin: 0; font: 600 18px var(--serif); }
 .calendar-sort-label { margin-left: auto; color: var(--muted); font: 10px var(--mono); }
 .calendar-toolbar select { min-width: 125px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); font: 11px var(--sans); }
+.calendar-view-switch { display: flex; gap: 7px; margin-top: 24px; }
+.calendar-view-switch a { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid transparent; border-radius: 5px; color: var(--muted); font-size: 11px; }
+.calendar-view-switch a span { min-width: 19px; padding: 2px 5px; border-radius: 10px; background: #eae6dc; color: var(--ink-soft); font: 9px var(--mono); text-align: center; }
+.calendar-view-switch a:hover, .calendar-view-switch a.active { border-color: var(--line); background: var(--panel); color: var(--ink); }
 .calendar-list { border-bottom: 1px solid var(--line); }
-.calendar-row { display: grid; grid-template-columns: 135px minmax(160px, 1fr) minmax(205px, auto) 24px; align-items: center; gap: 15px; min-height: 77px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+.calendar-row { display: grid; grid-template-columns: 135px minmax(160px, 1fr) minmax(90px, auto) minmax(205px, auto) 24px; align-items: center; gap: 15px; min-height: 77px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
 .calendar-row:last-child { border-bottom: 0; }
 .calendar-row:hover { background: var(--panel); }
 .calendar-date { color: var(--accent-deep); font: 11px var(--mono); }
 .calendar-info strong, .calendar-info small { display: block; }
 .calendar-info strong { font-size: 13px; }
 .calendar-info small { margin-top: 5px; color: var(--muted); font: 10px var(--mono); }
+.calendar-progress { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.calendar-row.is-completed .calendar-progress { color: var(--green); }
 .calendar-rating .rating-set { justify-content: flex-end; }
 .calendar-arrow { color: var(--muted); }
 .calendar-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 36px 18px; }
@@ -185,7 +191,10 @@ button { cursor: pointer; }
 @media (max-width: 780px) {
   .auth-gate { margin: 8vh auto; padding: 30px 23px; }
   .calendar-row { grid-template-columns: 95px minmax(120px, 1fr) 24px; gap: 8px; }
-  .calendar-rating { grid-column: 2; }
+  .calendar-date { grid-column: 1; grid-row: 1 / span 2; align-self: start; padding-top: 3px; }
+  .calendar-info { grid-column: 2; grid-row: 1; }
+  .calendar-progress { grid-column: 2; grid-row: 2; }
+  .calendar-rating { grid-column: 2; grid-row: 3; }
   .calendar-rating .rating-set { justify-content: flex-start; }
   .calendar-arrow { grid-column: 3; grid-row: 1; }
   .rule-language-grid { grid-template-columns: 1fr; gap: 16px; }
@@ -194,7 +203,8 @@ button { cursor: pointer; }
   .calendar-row { grid-template-columns: 1fr 22px; padding: 13px 4px; }
   .calendar-date { grid-column: 1; grid-row: 1; margin-bottom: -3px; }
   .calendar-info { grid-column: 1; grid-row: 2; }
-  .calendar-rating { grid-column: 1; grid-row: 3; }
+  .calendar-progress { grid-column: 1; grid-row: 3; }
+  .calendar-rating { grid-column: 1; grid-row: 4; }
   .calendar-arrow { grid-column: 2; grid-row: 2; }
   .calendar-toolbar { flex-wrap: wrap; }
   .calendar-toolbar .section-title-group { width: 100%; }
@@ -205,4 +215,35 @@ button { cursor: pointer; }
 }
 @media (max-width: 780px) {
   .login-button.is-logout { display: inline-flex; align-items: center; justify-content: center; min-width: 56px; }
+}
+
+.auth-loading { display: none; }
+body[data-auth-state="checking"] .auth-loading { display: grid; min-height: 100vh; place-content: center; color: var(--muted); font: 11px var(--mono); letter-spacing: .3px; }
+body[data-auth-state="checking"] .app-shell { display: none; }
+body[data-auth-state="unauthenticated"] .toast { display: none; }
+body[data-auth-state="unauthenticated"] .sidebar,
+body[data-auth-state="unauthenticated"] .topbar { display: none; }
+body[data-auth-state="unauthenticated"] .main-content { width: 100%; min-height: 100vh; }
+body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680px); padding: clamp(28px, 8vh, 80px) 0; }
+.auth-page { margin: 0 auto; padding: clamp(26px, 5vw, 48px); box-shadow: var(--shadow); }
+.auth-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 49px; }
+.auth-brand strong { display: block; font: 700 17px var(--serif); }
+.auth-brand small { display: block; margin-top: 2px; color: var(--muted); font: 9px var(--mono); letter-spacing: .2px; text-transform: uppercase; }
+.auth-page .eyebrow { margin-bottom: 0; }
+.auth-page h1 { margin-top: 13px; }
+.auth-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 25px 0 19px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.auth-switch button { min-height: 36px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }
+.auth-switch button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 4px rgba(32, 35, 34, .08); }
+.auth-page .form-field { margin-top: 14px; }
+.auth-page .form-field input { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--panel); color: var(--ink); font: 13px var(--sans); }
+.auth-page .form-field input:focus { outline: 2px solid rgba(198, 77, 53, .22); border-color: var(--accent-deep); }
+.auth-error { min-height: 19px; margin-top: 13px; color: var(--accent-deep); font-size: 11px; line-height: 1.5; }
+.auth-submit { width: 100%; min-height: 43px; margin-top: 8px; }
+.auth-submit:disabled { cursor: wait; opacity: .65; }
+.auth-footnote { margin: 22px 0 0 !important; color: var(--muted) !important; font-size: 10px !important; }
+@media (max-width: 520px) {
+  body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 28px, 680px); padding: 24px 0; }
+  .auth-page { padding: 24px 20px; }
+  .auth-brand { margin-bottom: 36px; }
+  .calendar-view-switch { margin-top: 18px; }
 }
