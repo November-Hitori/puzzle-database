@@ -1,6 +1,7 @@
 node_modules/
 data/*.sqlite
 data/*.sqlite-*
+data/trusted-users.json
 .env
 .env.*
 !.env.example
