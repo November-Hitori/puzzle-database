@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -22,6 +23,17 @@ const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-s
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
 const loginAttempts=new Map();
+const LOGIN_WINDOW_MS=15*60*1000;
+const LOGIN_ATTEMPT_IP_LIMIT=5000;
+
+function pruneLoginAttempts(now) {
+  for (const [address,attempts] of loginAttempts) {
+    const recent=attempts.filter((time)=>now-time<LOGIN_WINDOW_MS);
+    if (recent.length) loginAttempts.set(address,recent);
+    else loginAttempts.delete(address);
+  }
+  while (loginAttempts.size>=LOGIN_ATTEMPT_IP_LIMIT) loginAttempts.delete(loginAttempts.keys().next().value);
+}
 
 function loadMembers() {
   fs.mkdirSync(path.dirname(usersPath),{recursive:true});
@@ -57,10 +69,24 @@ async function readJson(request,limit=128*1024) {
   try { const value=JSON.parse(body); if (!value || typeof value!=='object' || Array.isArray(value)) throw new Error(); return value; }
   catch { throw Object.assign(new Error('invalid JSON body'),{status:400}); }
 }
-function sameOrigin(request) {
+function isLoopback(address) {
+  return address === '::1' || /^127\./.test(address) || /^::ffff:127\./i.test(address);
+}
+function proxyContext(request, trustLoopbackProxy) {
+  if (!trustLoopbackProxy || !isLoopback(request.socket.remoteAddress || '')) return null;
+  const protocol=request.headers['x-forwarded-proto'];
+  const address=request.headers['x-real-ip'];
+  if ((protocol!=='http'&&protocol!=='https') || typeof address!=='string' || address.includes(',') || address.trim()!==address || isIP(address)===0) return null;
+  return { protocol, address };
+}
+function sameOrigin(request, trustLoopbackProxy) {
   const origin=request.headers.origin;
   if (!origin) return false;
-  try { const source=new URL(origin); return source.host.toLowerCase()===String(request.headers.host||'').toLowerCase() && ['http:','https:'].includes(source.protocol); }
+  try {
+    const source=new URL(origin), proxy=proxyContext(request,trustLoopbackProxy);
+    const protocol=proxy?.protocol || (request.socket.encrypted?'https':'http');
+    return source.host.toLowerCase()===String(request.headers.host||'').toLowerCase() && source.protocol===`${protocol}:`;
+  }
   catch { return false; }
 }
 function validText(value,max=300,required=false) { return typeof value==='string' && value.trim().length <= max && (!required || value.trim().length>0); }
@@ -83,38 +109,39 @@ function validateRule(input) {
 function ensurePublicPuzzle(number) { return Boolean(getPuzzles('scope-check').some((p)=>p.number===number)); }
 function validateRatings(input) { return ['logic','intuition','enjoyment'].every((key)=>Number.isInteger(input[key])&&input[key]>=1&&input[key]<=5); }
 
-async function handleSession(request,response,pathname) {
+async function handleSession(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && pathname==='/api/session') return sendJson(response,200,{user:currentUser(request)});
   if (request.method==='POST' && pathname==='/api/session') {
-    if (!sameOrigin(request)) return sendJson(response,403,{error:'same-origin request required'});
-    const address=request.socket.remoteAddress||'unknown', now=Date.now(), attempts=loginAttempts.get(address)||[];
-    const recent=attempts.filter((time)=>now-time<15*60*1000);
+    if (!sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
+    const address=proxyContext(request,trustLoopbackProxy)?.address || request.socket.remoteAddress || 'unknown', now=Date.now(), attempts=loginAttempts.get(address)||[];
+    const recent=attempts.filter((time)=>now-time<LOGIN_WINDOW_MS);
     if (recent.length>=12) return sendJson(response,429,{error:'too many login attempts'});
     const input=await readJson(request,16*1024);
     if (typeof input.accessCode!=='string'||input.accessCode.length>256) return sendJson(response,400,{error:'accessCode is required'});
     const supplied=createHash('sha256').update(input.accessCode).digest();
     let match=null;
     for (const candidate of codeCandidates) if (timingSafeEqual(candidate.hash,supplied)) match=candidate;
-    if (!match) { recent.push(now); loginAttempts.set(address,recent); return sendJson(response,401,{error:'invalid invitation code'}); }
+    if (!match) { pruneLoginAttempts(now); recent.push(now); loginAttempts.set(address,recent); return sendJson(response,401,{error:'invalid invitation code'}); }
     loginAttempts.delete(address);
     const token=randomBytes(32).toString('base64url'), expires=Date.now()+SESSION_MS;
     createSession(tokenHash(token),match.member.id,expires);
-    const secure=request.socket.encrypted || request.headers['x-forwarded-proto']==='https';
+    const secure=request.socket.encrypted || proxyContext(request,trustLoopbackProxy)?.protocol==='https';
     const cookie=`${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_MS/1000)}${secure?'; Secure':''}`;
     return sendJson(response,200,{user:{id:match.member.id,name:match.member.name}},{'Set-Cookie':cookie});
   }
   if (request.method==='DELETE' && pathname==='/api/session') {
-    if (!sameOrigin(request)) return sendJson(response,403,{error:'same-origin request required'});
+    if (!sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
     const token=cookies(request)[SESSION_COOKIE]; if (token) deleteSession(tokenHash(token));
-    return sendJson(response,200,{user:null},{'Set-Cookie':`${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`});
+    const secure=request.socket.encrypted || proxyContext(request,trustLoopbackProxy)?.protocol==='https';
+    return sendJson(response,200,{user:null},{'Set-Cookie':`${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`});
   }
   return null;
 }
 
-async function handleApi(request,response,pathname) {
-  const sessionResult=await handleSession(request,response,pathname); if (sessionResult!==null) return;
+async function handleApi(request,response,pathname,trustLoopbackProxy) {
+  const sessionResult=await handleSession(request,response,pathname,trustLoopbackProxy); if (sessionResult!==null) return;
   const user=currentUser(request); if (!user) return sendJson(response,401,{error:'authentication required'});
-  if (['POST','PATCH','PUT','DELETE'].includes(request.method) && !sameOrigin(request)) return sendJson(response,403,{error:'same-origin request required'});
+  if (['POST','PATCH','PUT','DELETE'].includes(request.method) && !sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
   if (request.method==='GET' && pathname==='/api/puzzles') return sendJson(response,200,{puzzles:getPuzzles(user.id)});
   if (request.method==='GET' && pathname==='/api/folders') return sendJson(response,200,{folders:getFolders()});
   if (request.method==='GET' && pathname==='/api/collections') return sendJson(response,200,{collections:getCollections()});
@@ -200,11 +227,11 @@ function serveStatic(response,pathname) {
   response.writeHead(200,{'Content-Type':mimeTypes[path.extname(filePath)]||'application/octet-stream','Content-Security-Policy':contentSecurityPolicy,'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin','X-Frame-Options':'SAMEORIGIN'});
   fs.createReadStream(filePath).pipe(response);
 }
-export function createServer() {
+export function createServer({trustLoopbackProxy=process.env.PUZARCHIVE_TRUST_LOOPBACK_PROXY==='true'}={}) {
   return http.createServer(async(request,response)=>{
     try {
       const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
-      if (url.pathname.startsWith('/api/')) return await handleApi(request,response,url.pathname);
+      if (url.pathname.startsWith('/api/')) return await handleApi(request,response,url.pathname,trustLoopbackProxy);
       return serveStatic(response,url.pathname);
     } catch(error) {
       if (error.status) return sendJson(response,error.status,{error:error.message});

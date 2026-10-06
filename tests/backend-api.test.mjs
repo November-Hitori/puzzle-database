@@ -90,3 +90,38 @@ test('authenticated calendar, catalog, scope isolation, ownership and migration'
   assert.equal(logout.body.user,null);
   assert.equal((await request('/api/session',{},logout.cookie)).body.user,null);
 });
+
+test('forwarded headers are ignored by default and accepted only in trusted loopback proxy mode',async(t)=>{
+  const server=createServer();
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+  t.after(()=>new Promise((resolve)=>server.close(resolve)));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const headers={host:`127.0.0.1:${server.address().port}`,origin:base,'content-type':'application/json','x-forwarded-proto':'https','x-real-ip':'203.0.113.20'};
+  const spoofed=await fetch(`${base}/api/session`,{method:'POST',headers,body:JSON.stringify({accessCode:members[0].accessCode})});
+  assert.equal(spoofed.status,200);
+  assert.doesNotMatch(spoofed.headers.get('set-cookie'),/; Secure(?:;|$)/);
+  const wrongScheme=await fetch(`${base}/api/session`,{method:'POST',headers:{...headers,origin:base.replace('http:','https:')},body:JSON.stringify({accessCode:members[0].accessCode})});
+  assert.equal(wrongScheme.status,403);
+
+  const proxyServer=createServer({trustLoopbackProxy:true});
+  await new Promise((resolve,reject)=>{proxyServer.once('error',reject);proxyServer.listen(0,'127.0.0.1',resolve);});
+  t.after(()=>new Promise((resolve)=>proxyServer.close(resolve)));
+  const proxyBase=`http://127.0.0.1:${proxyServer.address().port}`;
+  const proxied=await fetch(`${proxyBase}/api/session`,{method:'POST',headers:{...headers,host:`127.0.0.1:${proxyServer.address().port}`,origin:proxyBase.replace('http:','https:')},body:JSON.stringify({accessCode:members[1].accessCode})});
+  assert.equal(proxied.status,200);
+  assert.match(proxied.headers.get('set-cookie'),/; Secure(?:;|$)/);
+  const secureLogout=await fetch(`${proxyBase}/api/session`,{method:'DELETE',headers:{...headers,host:`127.0.0.1:${proxyServer.address().port}`,origin:proxyBase.replace('http:','https:')}});
+  assert.match(secureLogout.headers.get('set-cookie'),/; Secure(?:;|$)/);
+  const invalidForwardedIp=await fetch(`${proxyBase}/api/session`,{method:'POST',headers:{...headers,host:`127.0.0.1:${proxyServer.address().port}`,origin:proxyBase.replace('http:','https:'),'x-real-ip':'203.0.113.20, 198.51.100.4'},body:JSON.stringify({accessCode:members[1].accessCode})});
+  assert.equal(invalidForwardedIp.status,403);
+
+  const addressA={...headers,host:`127.0.0.1:${proxyServer.address().port}`,origin:proxyBase.replace('http:','https:'),'x-real-ip':'198.51.100.31'};
+  for (let attempt=0;attempt<12;attempt++) {
+    const failed=await fetch(`${proxyBase}/api/session`,{method:'POST',headers:addressA,body:JSON.stringify({accessCode:'wrong-code'})});
+    assert.equal(failed.status,401);
+  }
+  assert.equal((await fetch(`${proxyBase}/api/session`,{method:'POST',headers:addressA,body:JSON.stringify({accessCode:'wrong-code'})})).status,429);
+  const addressB={...addressA,'x-real-ip':'198.51.100.32'};
+  assert.equal((await fetch(`${proxyBase}/api/session`,{method:'POST',headers:addressB,body:JSON.stringify({accessCode:'wrong-code'})})).status,401);
+  assert.equal((await fetch(`${proxyBase}/api/session`,{method:'POST',headers:addressB,body:JSON.stringify({accessCode:members[1].accessCode})})).status,200);
+});

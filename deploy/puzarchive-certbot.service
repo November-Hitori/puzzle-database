@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew PuzArchive short-lived IP TLS certificate
+
+[Service]
+Type=oneshot
+ExecStart=/opt/puzarchive/certbot-venv/bin/certbot renew --quiet
