@@ -58,7 +58,7 @@ npm test
 
 ## 私有服务器部署
 
-服务器部署使用专用系统用户和 Node.js 22.23.3，SQLite 与历史成员配置保存在应用目录之外，并每日创建私有备份。应用仅监听 `127.0.0.1:4173`；临时邀请测试入口通过 Nginx 与短期 IP HTTPS 证书提供。详见 [docs/deployment.md](docs/deployment.md)，包括关闭临时入口的步骤。
+服务器部署使用专用系统用户和 Node.js 22.23.3，SQLite 与历史成员配置保存在应用目录之外，并每日创建私有备份。应用仅监听 `127.0.0.1:4173`；临时邀请测试入口通过 Nginx 与短期 IP HTTPS 证书提供。详见 [docs/deployment.md](docs/deployment.md)，包括 SSH 直连配置与关闭临时入口的步骤。代码变更、独立验收和生产发布顺序见[贡献与发布工作流](docs/contribution-workflow.md)。
 
 ## 后续工作
 

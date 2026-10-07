@@ -1,12 +1,27 @@
 # Private server deployment
 
-The first deployment runs on Ubuntu 24.04 with the app bound to `127.0.0.1:4173`. No public listener, reverse proxy, tunnel, or firewall rule is configured. Use an SSH local forward from a trusted computer to reach it:
+The app runs on Ubuntu 24.04 and binds to `127.0.0.1:4173`. For direct private access, use an SSH local forward from a trusted computer:
 
 ```sh
-ssh -i /path/to/key_test.pem -N -L 127.0.0.1:14173:127.0.0.1:4173 ubuntu@SERVER_IP
+ssh -F ~/.ssh/puzarchive.conf -N -L 127.0.0.1:14173:127.0.0.1:4173 puzzle-database-server
 ```
 
-Then open <http://127.0.0.1:14173/>. Use `127.0.0.1` in the browser: cookies are scoped by host, not port, and this host spelling keeps the deployed session separate from a local app opened at `http://localhost:4173/`. On Windows, use the original key file in PowerShell. On Linux or WSL, copy it into the Linux filesystem and restrict it to mode `0600` before connecting.
+Create a dedicated `~/.ssh/puzarchive.conf` with the server address and alias. Point `IdentityFile` at a Linux-local private-key copy named `~/.ssh/puzarchive_id_rsa`, and `UserKnownHostsFile` at `~/.ssh/puzarchive_known_hosts`. On Linux or WSL, keep the SSH directory at mode `0700` and both files at `0600`. Compare the server's ED25519 fingerprint with one obtained from its trusted console before saving its key in this dedicated known-hosts file; keep `StrictHostKeyChecking yes` and preserve the normal SSH config and known-hosts files. On Windows, use the original key in PowerShell with an equivalent host-key check.
+
+If SSH reports a changed host key, stop and obtain the current ED25519 fingerprint again from the trusted server console before updating the dedicated pin. Never bypass the mismatch with `StrictHostKeyChecking no`, `accept-new`, or by deleting the old pin without verification. The Linux-local key and pin remain until that Linux environment is deleted; restore them from a separately protected backup if they are lost, since their persistence is not guaranteed beyond that environment.
+
+```sshconfig
+Host puzzle-database-server
+  HostName SERVER_IP
+  User ubuntu
+  IdentityFile ~/.ssh/puzarchive_id_rsa
+  UserKnownHostsFile ~/.ssh/puzarchive_known_hosts
+  StrictHostKeyChecking yes
+  IdentitiesOnly yes
+  BatchMode yes
+```
+
+Then open <http://127.0.0.1:14173/>. Use `127.0.0.1` in the browser: cookies are scoped by host, not port, and this host spelling keeps the deployed session separate from a local app opened at `http://localhost:4173/`.
 
 The app runs as the dedicated `puzarchive` system user. Code and the pinned Node.js runtime are in `/opt/puzarchive`; the SQLite database and trusted member configuration are in `/var/lib/puzarchive` with owner-only permissions. The service reads `/etc/puzarchive/puzarchive.env`, binds to loopback, restarts after failures, and starts at boot. Logs are available with `sudo journalctl -u puzarchive`.
 
@@ -15,6 +30,8 @@ The app runs as the dedicated `puzarchive` system user. Code and the pinned Node
 The runtime is Node.js 22.23.3 for Linux x64, downloaded from the official Node.js distribution and checked against SHA-256 `df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de`. The app uses Node's built-in SQLite module and has no production npm dependencies.
 
 The initial install stages an app-only copy and a consistent snapshot containing `puzarchive.sqlite` and `trusted-users.json`, then runs `deploy/install.sh` as root. The installer refuses to overwrite an existing app, runtime, or database. It installs and enables the app service and daily backup timer. For a later code update, stage and review a new release separately; do not rerun the initial installer over an existing deployment. Before activation, ensure the staged app has an empty `data/` directory owned by `root:root` with mode `0755`: startup creates this default directory even when the database paths point to `/var/lib/puzarchive`, and the service keeps app code read-only. Never copy the live database or member configuration into the app directory.
+
+Follow the required [contribution and release workflow](contribution-workflow.md) before uploading source or testing a release on the server.
 
 ## Backups and restore checks
 
