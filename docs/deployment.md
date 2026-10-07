@@ -58,6 +58,12 @@ sudo -u puzarchive env PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite 
 
 Rotating the shared code affects only future registrations; existing account credentials and sessions are unchanged. Disabling registration stops new registrations but does not revoke existing accounts. Revoking an account disables it and deletes its sessions while preserving puzzle history. Because the shared code remains available to its holders, preventing a revoked person from creating another account also requires rotating or disabling registration. Start the service once after upgrade before running these commands so the one-time migration can establish the pending legacy identity claim.
 
+### Rule drafts and review
+
+Authenticated members can create and edit rule drafts. Creation requires a category and at least one Chinese or English name; all other content can be added later. The service reports missing Chinese/English names, descriptions, example links, and variant bases as quality errors. A supplied example must be a concrete supported Penpa puzzle URL; empty is allowed while drafting. Variant bases are optional for drafts but, when supplied, must refer to a different original rule.
+
+Each rule has three independent audit groups: bilingual name, bilingual description plus variant semantics, and example URL. A group is approved only after three distinct active accounts approve the current revision. Repeated approval by the same account is idempotent. Any current-revision rejection blocks approval until that group's content is meaningfully edited; rejection suggestions are optional. Editing one group advances only its revision and preserves all earlier review events and content snapshots. Category edits do not reset audit groups, but a separate edit version prevents stale saves from overwriting concurrent changes. Quality errors and warnings are computed by the server and returned with `GET /api/rules`.
+
 Inspect the service and loopback listener with:
 
 ```sh

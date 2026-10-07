@@ -1,4 +1,4 @@
-import { getPuzzleSource, hasConcretePuzzlePayload, parseTrustedPuzzleUrl } from './puzzle-url.mjs';
+import { getPuzzleSource, hasConcretePuzzlePayload, isConcretePenpaPuzzleUrl, parseTrustedPuzzleUrl } from './puzzle-url.mjs';
 import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 
@@ -24,6 +24,8 @@ const state = {
   privateLoading: false,
   sessionEpoch: 0,
   calendarSort: 'date',
+  ruleFilter: 'all',
+  ruleQuery: '',
   submissionDraft: null
 };
 const app = document.querySelector('#app');
@@ -51,7 +53,7 @@ async function apiRequest(path, options = {}) {
     let message = `HTTP ${response.status}`;
     message = payload.error || message;
     if (response.status === 401 && state.sessionChecked && authenticatedAtStart && !authEndpoint) handleUnauthorized();
-    throw new Error(message);
+    const error = new Error(message); error.status = response.status; throw error;
   }
   return payload;
 }
@@ -94,7 +96,7 @@ function renderCalendar(pending = false) {
     const ad = a.suggestedDate || '9999-99-99'; const bd = b.suggestedDate || '9999-99-99';
     return state.calendarSort === 'newest' ? b.number - a.number : ad.localeCompare(bd) || b.number - a.number;
   });
-  const rows = puzzles.map((puzzle) => `<a class="calendar-row ${puzzle.completed ? 'is-completed' : ''}" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '日期未定'}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${esc(puzzle.rule?.titleZh || puzzle.type)} · ${esc(puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small></span><span class="calendar-progress">${puzzle.completed ? '✓ 你已完成' : '待你解题'}</span><span class="calendar-rating">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><span class="calendar-arrow">→</span></a>`).join('');
+  const rows = puzzles.map((puzzle) => `<a class="calendar-row ${puzzle.completed ? 'is-completed' : ''}" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '日期未定'}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${puzzle.rule ? ruleLabel(puzzle.rule) : esc(puzzle.type)} · ${esc(puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small></span><span class="calendar-progress">${puzzle.completed ? '✓ 你已完成' : '待你解题'}</span><span class="calendar-rating">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><span class="calendar-arrow">→</span></a>`).join('');
   const pageTitle = pending ? '我的未完成谜题' : '谜题日历';
   const emptyState = pending
     ? `<div class="empty-state calendar-empty"><strong>没有待解题目</strong><span>这份清单只统计你自己的完成记录。</span><a class="button button-light" href="#calendar">查看全部投稿</a></div>`
@@ -103,9 +105,39 @@ function renderCalendar(pending = false) {
 }
 function renderRules() {
   const rules = state.rules;
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则管理<span class="heading-period">.</span></h1><p class="page-description">统一维护中英文规则、分类和变体来源。</p></div>${button('<span class="button-plus">+</span>新建规则', 'addRuleButton')}</section><div class="rule-catalog">${rules.length ? rules.map((rule) => `<article class="rule-card"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category)}</span><h2>${esc(rule.titleZh)} <small>${esc(rule.titleEn)}</small></h2></div>${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}</div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rules.find((item) => String(item.id) === String(rule.baseRuleId))?.titleZh || '原始规则')}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></article>`).join('') : '<div class="empty-state">规则目录还没有内容。新建规则后即可用于日历投稿。</div>'}</div></div>`;
+  const filtered = rules.filter((rule) => ruleMatchesRuleFilter(rule, state.ruleFilter) && (!state.ruleQuery || `${rule.titleZh || ''} ${rule.titleEn || ''} ${rule.category || ''} ${(rule.rulesZh || []).join(' ')} ${(rule.rulesEn || []).join(' ')}`.toLowerCase().includes(state.ruleQuery.toLowerCase())));
+  const totals = rules.reduce((sum, rule) => { const quality = rule.quality || {}; sum.errors += (quality.errors || []).length; sum.warnings += (quality.warnings || []).length; return sum; }, { errors: 0, warnings: 0 });
+  const problemRules = rules.filter((rule) => (rule.quality?.errors || []).length + (rule.quality?.warnings || []).length > 0).length;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则目录<span class="heading-period">.</span></h1><p class="page-description">规则允许先保存为草稿；名称、规则描述与例题分别完成独立审核。</p></div>${button('<span class="button-plus">+</span>新建规则', 'addRuleButton')}</section><section class="rule-quality-summary" aria-label="目录质量概况"><div><span>目录规则</span><strong>${rules.length}</strong></div><div><span>受影响规则</span><strong>${problemRules}</strong></div><div class="quality-count-error"><span>错误项</span><strong>${totals.errors}</strong></div><div class="quality-count-warning"><span>待审核项</span><strong>${totals.warnings}</strong></div></section><section class="rule-catalog-tools"><label class="rule-search"><span class="sr-only">搜索规则</span><input id="ruleSearch" type="search" value="${esc(state.ruleQuery)}" placeholder="搜索中英文名称、分类或规则" /></label><div class="rule-filter-tabs" role="group" aria-label="规则筛选">${[['all','全部'],['problem','有问题'],['error','错误'],['warning','待审核']].map(([key,label]) => `<button type="button" class="rule-filter-button ${state.ruleFilter === key ? 'active' : ''}" data-rule-filter="${key}">${label}</button>`).join('')}</div></section><div class="rule-catalog">${filtered.length ? filtered.map((rule) => renderRuleCard(rule, rules)).join('') : '<div class="empty-state">没有符合筛选条件的规则。</div>'}</div></div>`;
 }
 function clauseMarkup(clauses = []) { return `<ol class="rule-clauses">${clauses.map((clause) => `<li>${esc(clause)}</li>`).join('')}</ol>`; }
+function ruleTitle(rule) { return rule.titleZh || rule.titleEn || '未命名规则'; }
+function ruleLabel(rule) { return esc([rule.titleZh, rule.titleEn].filter(Boolean).join(' / ') || '未命名规则'); }
+function ruleTitlePair(rule) { const primary = rule.titleZh || rule.titleEn || '未命名规则'; const secondary = rule.titleZh && rule.titleEn ? ` <small>${esc(rule.titleEn)}</small>` : ''; return `${esc(primary)}${secondary}`; }
+function ruleMatchesRuleFilter(rule, filter) { const quality = rule.quality || {}; const errors = quality.errors || []; const warnings = quality.warnings || []; if (filter === 'problem') return errors.length + warnings.length > 0; if (filter === 'error') return errors.length > 0; if (filter === 'warning') return warnings.length > 0; return true; }
+const auditLabels = { name: '名称', description: '规则描述', example: '例题' };
+function renderRuleCard(rule, allRules) {
+  const quality = rule.quality || { errors: [], warnings: [], groups: {} };
+  const errors = quality.errors || []; const warnings = quality.warnings || []; const groups = quality.groups || {};
+  const baseRule = allRules.find((item) => String(item.id) === String(rule.baseRuleId));
+  const auditCards = ['name', 'description', 'example'].map((item) => renderAuditGroup(rule, item, groups[item] || {}, errors, warnings)).join('');
+  const exampleLink = isConcretePenpaPuzzleUrl(rule.exampleUrl) ? `<a class="rule-example-link" href="${esc(rule.exampleUrl)}" target="_blank" rel="noopener noreferrer">打开 Penpa 例题 ↗</a>` : '<p class="rule-missing">尚未提供有效的 Penpa 例题</p>';
+  return `<article class="rule-card" data-rule-card="${esc(rule.id)}"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category || '未分类')}</span><h2>${ruleTitlePair(rule)}</h2></div><div class="rule-card-actions">${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}<button type="button" class="button button-light rule-edit-button" data-rule-edit="${esc(rule.id)}">编辑</button></div></div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rule.baseRuleTitleEn || (baseRule ? ruleTitle(baseRule) : '未指定'))}</p>` : ''}<div class="rule-quality-inline">${errors.length ? `<span class="quality-error-pill">${errors.length} 项错误</span>` : '<span class="quality-ok-pill">无错误项</span>'}${warnings.length ? `<span class="quality-warning-pill">${warnings.length} 项待审核</span>` : ''}</div>${errors.length || warnings.length ? `<ul class="rule-quality-messages">${[...errors.map((entry) => ({ ...entry, severity: 'error' })), ...warnings.map((entry) => ({ ...entry, severity: 'warning' }))].map((entry) => `<li class="${entry.severity}">${esc(entry.message)}</li>`).join('')}</ul>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${rule.rulesZh?.length ? clauseMarkup(rule.rulesZh) : '<p class="rule-missing">尚未填写中文规则描述</p>'}</section><section><h3>Rules · English</h3>${rule.rulesEn?.length ? clauseMarkup(rule.rulesEn) : '<p class="rule-missing">English description not provided</p>'}</section></div>${exampleLink}<section class="rule-audit-grid" aria-label="独立审核">${auditCards}</section></article>`;
+}
+function renderAuditGroup(rule, item, group, errors, warnings) {
+  const itemErrors = errors.filter((entry) => entry.item === item);
+  const itemWarnings = warnings.filter((entry) => entry.item === item);
+  const incomplete = group.status === 'incomplete' || itemErrors.length > 0;
+  const rejected = Boolean(group.rejected) || group.status === 'rejected';
+  const approvals = Number(group.approvalCount || 0); const required = Number(group.requiredApprovals || 3);
+  const approvedBy = (group.currentReviews || []).filter((review) => review.decision === 'approve' && review.active !== false).map((review) => review.name || '成员');
+  const rejectionSuggestion = group.rejectionSuggestion || (group.currentReviews || []).find((review) => review.decision === 'reject')?.suggestion;
+  const currentReview = (group.currentReviews || []).find((review) => String(review.userId) === String(state.user?.id));
+  const history = group.history || [];
+  const statusLabel = rejected ? '有打回意见' : group.status === 'approved' ? '已通过' : incomplete ? '内容未完整' : `${approvals}/${required} 通过`;
+  const approveDisabled = incomplete || rejected || group.status === 'approved' || currentReview?.decision === 'approve';
+  return `<article class="rule-audit-item ${rejected ? 'is-rejected' : ''} ${group.status === 'approved' ? 'is-approved' : ''}"><header><div><h3>${auditLabels[item]}</h3><span class="audit-status">${statusLabel}</span></div><span class="audit-count" title="需要不同账号独立审核">${approvals}/${required} 位成员</span></header>${incomplete ? `<p class="audit-explanation">${itemErrors.map((entry) => esc(entry.message)).join('；') || '补齐缺项后才能通过'}</p>` : `<p class="audit-reviewers">${approvedBy.length ? `通过成员：${approvedBy.map(esc).join('、')}` : '等待成员审核'}</p>`}${rejected ? `<div class="audit-rejection"><strong>审计建议</strong><p>${esc(rejectionSuggestion || '未填写建议')}</p></div>` : ''}${itemWarnings.map((entry) => `<p class="audit-explanation">${esc(entry.message)}</p>`).join('')}<div class="audit-actions"><button type="button" class="button button-light" data-rule-audit="approve" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${approveDisabled ? 'disabled' : ''} title="${incomplete ? '补齐缺项后才能通过' : rejected ? '被打回的内容需先实际修改' : group.status === 'approved' ? '本审核项已有三位成员通过' : ''}">✓ ${currentReview?.decision === 'approve' ? '已通过' : '通过'}</button><button type="button" class="text-button audit-reject-button" data-rule-audit="reject" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${currentReview?.decision === 'reject' ? 'disabled' : ''}>打回并建议</button></div>${history.length ? `<details class="audit-history"><summary>审核记录（${history.length}）</summary><ol>${history.map((entry) => `<li><strong>${esc(entry.name || '成员')}</strong> · ${entry.decision === 'approve' ? '通过' : '打回'} · 第 ${esc(entry.revision)} 版 · ${esc(entry.createdAt || '')}${entry.suggestion ? `<p>${esc(entry.suggestion)}</p>` : ''}</li>`).join('')}</ol></details>` : ''}</article>`;
+}
 
 
 function renderFiles() { const folders = state.folders; return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>FILE MANAGER</p><h1>文件管理<span class="heading-period">.</span></h1><p class="page-description">把来源、年份和题集放进清晰的文件夹。</p></div>${button('<span class="button-plus">+</span>新建文件夹', 'newFolderButton')}</section><section class="file-toolbar"><div class="file-breadcrumb"><button type="button" data-file-home>全部文件</button>${state.filePath.slice(1).map((part) => `<span> / </span><strong>${esc(part)}</strong>`).join('')}</div><div class="file-actions"><button class="button button-light" type="button" id="sortFilesButton">按最近更新</button><button class="icon-button bordered" type="button" title="列表视图">☷</button></div></section><section class="file-layout"><div class="file-main"><div class="file-section-heading"><span>FOLDERS</span><span>${folders.length} 个文件夹</span></div><div class="folder-cards">${folders.map((folder) => `<button class="folder-card" type="button" data-folder="${esc(folder.id)}"><span class="folder-card-icon">▰</span><strong>${esc(folder.name)}</strong><small>${folder.count} puzzles <span>→</span></small></button>`).join('')}<button class="folder-card folder-card-new" type="button" id="newFolderCard"><span>+</span><strong>新建文件夹</strong></button></div><div class="file-section-heading file-section-heading-spaced"><span>RECENT FILES</span><span>按最近修改</span></div><div class="file-table"><div class="file-row file-head"><span>名称</span><span>位置</span><span>题目</span><span>更新</span></div>${[['Spring Selection', 'Logic Masters India / 2026', '08', '今天'], ['Paper & Pencil / Vol. 01', '日本パズル協会 / 2025', '24', '2 天前'], ['Example Puzzles', '个人收藏 / 2024', '12', '上周']].map(([name, location, count, updated]) => `<a class="file-row" href="#puzzle-128"><span class="file-name"><span class="file-mini-icon">▰</span><strong>${name}</strong></span><span class="muted">${location}</span><span>${count}</span><span class="muted">${updated}</span></a>`).join('')}</div></div><aside class="file-aside"><div class="file-aside-icon">⌘</div><h2>你的题目，<br /><em>有自己的位置。</em></h2><p>用来源、年份和题集整理资料。文件夹可以无限嵌套，之后也能随时移动。</p><div class="tree-mini"><span>⌄　▰ Logic Masters India</span><span>　⌄　▰ 2026</span><span>　　 ›　▰ Spring Selection</span></div></aside></section></div>`; }
@@ -121,7 +153,7 @@ function renderPuzzlePage(number, scope = 'library') {
   if (!puzzle) return `<div class="page-wrap-inner"><div class="empty-state">找不到这道${isCalendar ? '日历' : ''}谜题。</div><a class="back-link" href="#${isCalendar ? 'calendar' : 'library'}">返回${isCalendar ? '谜题日历' : '题库'}</a></div>`;
   const hasRating = puzzle.userRating;
   const rule = puzzle.rule;
-  const ruleSection = rule ? `<details open><summary>${esc(rule.titleZh)} <span class="muted">${esc(rule.titleEn || '')}</span></summary>${rule.isVariant ? `<p class="rule-base">变体自：${esc(rule.baseRuleTitleZh || '原始规则')}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></details>` : `<details><summary>查看题目规则</summary><p>${esc(puzzle.rules || '暂未提供规则。')}</p></details>`;
+  const ruleSection = rule ? `<details open><summary>${ruleTitlePair(rule)}</summary>${rule.isVariant ? `<p class="rule-base">变体自：${esc(rule.baseRuleTitleZh || rule.baseRuleTitleEn || ruleTitle(state.rules.find((item) => String(item.id) === String(rule.baseRuleId)) || {}))}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></details>` : `<details><summary>查看题目规则</summary><p>${esc(puzzle.rules || '暂未提供规则。')}</p></details>`;
   const dateControl = isCalendar && String(puzzle.submittedBy?.id) === String(state.user?.id) ? `<div class="detail-block"><h3>建议日期</h3><label class="inline-date-label" for="suggestedDateEdit">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '尚未安排'}</label><input id="suggestedDateEdit" type="date" value="${esc(puzzle.suggestedDate || '')}" /><button class="button button-light date-save-button" id="saveSuggestedDateButton" type="button">保存日期</button></div>` : '';
   const authorName = puzzle.author || puzzle.submittedBy?.name || '未知作者';
   const authorLabel = isCalendar ? esc(authorName) : `<a href="#authors">${esc(authorName)}</a>`;
@@ -151,10 +183,10 @@ function isSupportedPuzzleUrl(value) { return parseTrustedPuzzleUrl(value) !== n
 function openRating(number, scope = 'library') { const isCalendar = scope === 'calendar'; const puzzles = isCalendar ? state.calendarPuzzles : state.puzzles; const puzzle = puzzles.find((item) => Number(item.number) === Number(number)); if (!puzzle) return; const current = puzzle.userRating || [3, 3, 3]; openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`); ['logic', 'intuition', 'love'].forEach((key) => { const input = document.querySelector(`#${key}Rating`); const output = document.querySelector(`#${key}Value`); input.addEventListener('input', () => { output.textContent = input.value; }); }); document.querySelector('#submitRatingButton').addEventListener('click', async () => { const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value)); const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const path = isCalendar ? `/api/calendar/puzzles/${number}/complete-rating` : `/api/puzzles/${number}/complete-rating`; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) }); if (isCalendar) state.calendarPuzzles = data.puzzles.map(normalizePuzzle); else applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('完成记录已保存，平均评分已更新'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
 function bindLibrary() { document.querySelector('#addPuzzleButton')?.addEventListener('click', openAddPuzzle); document.querySelector('#filterButton')?.addEventListener('click', () => { const row = document.querySelector('#filterRow'); row.hidden = !row.hidden; }); document.querySelectorAll('.filter-pill').forEach((button) => button.addEventListener('click', () => { state.filter = button.dataset.filter; state.visible = 6; renderRoute(); })); document.querySelectorAll('.segment').forEach((button) => button.addEventListener('click', () => { state.sort = button.dataset.sort; renderRoute(); })); document.querySelector('#loadMoreButton')?.addEventListener('click', () => { state.visible = Math.min(state.visible + 2, filteredPuzzles().length); renderRoute(); showToast('已加载更多题目'); }); document.querySelector('#noticeButton')?.addEventListener('click', () => showToast('公告详情将在公告模块接入后开放')); }
 function openAddPuzzle(scope = 'library', draft = {}) {
-  const options = state.rules.map((rule) => `<option value="${esc(rule.id)}" ${String(draft.ruleId || '') === String(rule.id) ? 'selected' : ''}>${esc(rule.titleZh)} · ${esc(rule.titleEn)}</option>`).join('');
+  const options = state.rules.map((rule) => `<option value="${esc(rule.id)}" ${String(draft.ruleId || '') === String(rule.id) ? 'selected' : ''}>${ruleLabel(rule)}</option>`).join('');
   const isCalendar = scope === 'calendar';
   openModal(`<p class="modal-eyebrow">${isCalendar ? 'PRIVATE CALENDAR' : 'NEW LIBRARY ENTRY'}</p><h2 id="modalTitle">${isCalendar ? '提交日历谜题' : '添加一道题目'}</h2><p class="modal-intro">先选择目录中的规则；如果没有合适规则，可以创建后自动返回此表单。</p><label class="form-field"><span>规则（必选）</span><select id="submissionRule"><option value="">选择规则</option>${options}</select><button class="text-button rule-create-inline" id="createRuleFromSubmission" type="button">＋ 新建规则</button></label><div id="submissionRulePreview" class="submission-rule-preview"></div><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" value="${esc(draft.title || '')}" placeholder="例如：Five Cells" /></label><label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" value="${esc(draft.url || '')}" placeholder="https://puzz.link/..." /></label><label class="form-field"><span>作者</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || '')}" placeholder="作者名" /></label><label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external" ${draft.inputMode !== 'blank' ? 'selected' : ''}>外部题目（puzz.link / penpa+）</option><option value="blank" ${draft.inputMode === 'blank' ? 'selected' : ''}>纯填空题</option></select></label><label class="form-field"><span>作者说明（可选）</span><textarea id="newPuzzleNote" rows="3" placeholder="简要介绍这道题">${esc(draft.note || '')}</textarea></label><label class="form-field"><span>答案（纯填空题可选）</span><input id="newPuzzleAnswer" type="text" value="${esc(draft.answer || '')}" placeholder="答案" /></label>${isCalendar ? `<label class="form-field"><span>建议日期（可选）</span><input id="newPuzzleDate" type="date" value="${esc(draft.suggestedDate || '')}" /></label>` : ''}<div class="modal-error" id="submissionError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
-  const preview = () => { const rule = state.rules.find((item) => String(item.id) === String(document.querySelector('#submissionRule').value)); document.querySelector('#submissionRulePreview').innerHTML = rule ? `<strong>${esc(rule.titleZh)} · ${esc(rule.titleEn)}</strong>${clauseMarkup(rule.rulesZh)}` : '<span class="muted">选择目录规则后可预览规则。</span>'; };
+  const preview = () => { const rule = state.rules.find((item) => String(item.id) === String(document.querySelector('#submissionRule').value)); document.querySelector('#submissionRulePreview').innerHTML = rule ? `<strong>${ruleTitlePair(rule)}</strong>${clauseMarkup(rule.rulesZh)}` : '<span class="muted">选择目录规则后可预览规则。</span>'; };
   document.querySelector('#submissionRule').addEventListener('change', preview); preview();
   document.querySelector('#createRuleFromSubmission').addEventListener('click', () => { state.submissionDraft = { scope, draft: captureSubmissionDraft() }; openRuleEditor({ fromSubmission: true }); });
   document.querySelector('#savePuzzleButton').addEventListener('click', async () => {
@@ -173,17 +205,84 @@ function openAddPuzzle(scope = 'library', draft = {}) {
   });
 }
 function captureSubmissionDraft() { return { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '', suggestedDate: document.querySelector('#newPuzzleDate')?.value || '' }; }
-function openRuleEditor({ fromSubmission = false, draft = null } = {}) {
-  const baseOptions = state.rules.filter((rule) => !rule.isVariant).map((rule) => `<option value="${esc(rule.id)}">${esc(rule.titleZh)} · ${esc(rule.titleEn)}</option>`).join('');
-  openModal(`<p class="modal-eyebrow">RULE CATALOG</p><h2 id="modalTitle">新建规则</h2><p class="modal-intro">每行填写一条规则，页面会自动编号。中英文标题与规则均需填写。</p><label class="form-field"><span>中文标题</span><input id="ruleTitleZh" type="text" aria-label="规则中文标题" /></label><label class="form-field"><span>English title</span><input id="ruleTitleEn" type="text" aria-label="Rule English title" /></label><label class="form-field"><span>分类</span><select id="ruleCategory">${ruleCategories.map((item) => `<option>${item}</option>`).join('')}</select></label><label class="variant-toggle"><input id="ruleIsVariant" type="checkbox" /> 这是变体规则</label><label class="form-field" id="baseRuleField" hidden><span>原始规则（必选）</span><select id="ruleBase"><option value="">选择原始规则</option>${baseOptions}</select></label><label class="form-field"><span>规则 · 中文（每行一条）</span><textarea id="ruleClausesZh" rows="5" aria-label="中文规则，每行一条"></textarea></label><label class="form-field"><span>Rules · English (one clause per line)</span><textarea id="ruleClausesEn" rows="5" aria-label="English rules, one clause per line"></textarea></label><div class="modal-error" id="ruleError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存规则', 'saveRuleButton')}</div>`);
+function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = {}) {
+  const editing = Boolean(rule);
+  const rejectedItems = editing ? ['name', 'description', 'example'].filter((item) => rule.quality?.groups?.[item]?.rejected || rule.quality?.groups?.[item]?.status === 'rejected') : [];
+  const rejectedHint = rejectedItems.length ? `<p class="audit-edit-warning" role="note">${rejectedItems.map((item) => auditLabels[item]).join('、')}已被打回。只有实际修改该项内容后才会重新开始审核；重新保存相同内容不会清除打回状态。</p>` : '';
+  const baseOptions = state.rules.filter((item) => !item.isVariant).map((item) => `<option value="${esc(item.id)}" ${String(rule?.baseRuleId || '') === String(item.id) ? 'selected' : ''}>${ruleLabel(item)}</option>`).join('');
+  openModal(`<p class="modal-eyebrow">RULE CATALOG</p><h2 id="modalTitle">${editing ? '编辑规则' : '新建规则'}</h2><p class="modal-intro">名称、规则描述、例题会分别审核。可先保存草稿，留空项会标示为待补充。</p>${rejectedHint}<label class="form-field"><span>中文名称</span><input id="ruleTitleZh" type="text" value="${esc(rule?.titleZh || '')}" aria-label="规则中文名称" /></label><label class="form-field"><span>English name</span><input id="ruleTitleEn" type="text" value="${esc(rule?.titleEn || '')}" aria-label="Rule English name" /></label><label class="form-field"><span>分类 <b class="required-mark">必填</b></span><select id="ruleCategory"><option value="">选择分类</option>${ruleCategories.map((item) => `<option ${rule?.category === item ? 'selected' : ''}>${item}</option>`).join('')}</select></label><label class="form-field"><span>规则描述 · 中文（每行一条，可留空）</span><textarea id="ruleClausesZh" rows="4" aria-label="中文规则描述，每行一条">${esc((rule?.rulesZh || draft?.rulesZh || []).join('\n'))}</textarea></label><label class="form-field"><span>Rules · English (one clause per line, optional)</span><textarea id="ruleClausesEn" rows="4" aria-label="English rule description, one clause per line">${esc((rule?.rulesEn || draft?.rulesEn || []).join('\n'))}</textarea></label><label class="form-field"><span>例题 Penpa URL（可留空）</span><input id="ruleExampleUrl" type="url" value="${esc(rule?.exampleUrl || '')}" placeholder="https://penpa-edit.com/..." /></label><label class="variant-toggle"><input id="ruleIsVariant" type="checkbox" ${rule?.isVariant ? 'checked' : ''} /> 这是变体规则</label><label class="form-field" id="baseRuleField" ${rule?.isVariant ? '' : 'hidden'}><span>原始规则（可后补）</span><select id="ruleBase"><option value="">暂不选择</option>${baseOptions}</select></label><div class="modal-error" id="ruleError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button(editing ? '保存修改' : '保存规则草稿', 'saveRuleButton')}</div>`);
   document.querySelector('#ruleIsVariant').addEventListener('change', (event) => { document.querySelector('#baseRuleField').hidden = !event.target.checked; });
   document.querySelector('#saveRuleButton').addEventListener('click', async () => {
-    const titleZh = document.querySelector('#ruleTitleZh').value.trim(); const titleEn = document.querySelector('#ruleTitleEn').value.trim(); const category = document.querySelector('#ruleCategory').value; const isVariant = document.querySelector('#ruleIsVariant').checked; const baseRuleId = document.querySelector('#ruleBase').value || null; const rulesZh = document.querySelector('#ruleClausesZh').value.split('\n').map((item) => item.trim()).filter(Boolean); const rulesEn = document.querySelector('#ruleClausesEn').value.split('\n').map((item) => item.trim()).filter(Boolean);
-    if (!titleZh || !titleEn || !rulesZh.length || !rulesEn.length || (isVariant && !baseRuleId)) { document.querySelector('#ruleError').textContent = '请填写双语标题与规则；变体必须选择原始规则。'; return; }
-    const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const errorNode = document.querySelector('#ruleError');
-    try { const data = await apiRequest('/api/rules', { method: 'POST', body: JSON.stringify({ titleZh, titleEn, category, isVariant, baseRuleId, rulesZh, rulesEn }) }); state.rules = data.rules || [...state.rules, data.rule]; closeModal(); if (fromSubmission) openAddPuzzle(state.submissionDraft?.scope || 'library', { ...(state.submissionDraft?.draft || draft || {}), ruleId: data.rule.id }); else { renderRoute(); showToast('规则已创建'); } state.submissionDraft = null; }
-    catch (error) { if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message; }
+    const titleZh = document.querySelector('#ruleTitleZh').value.trim(); const titleEn = document.querySelector('#ruleTitleEn').value.trim(); const category = document.querySelector('#ruleCategory').value; const isVariant = document.querySelector('#ruleIsVariant').checked; const baseRuleId = document.querySelector('#ruleBase').value || null; const rulesZh = document.querySelector('#ruleClausesZh').value.split('\n').map((item) => item.trim()).filter(Boolean); const rulesEn = document.querySelector('#ruleClausesEn').value.split('\n').map((item) => item.trim()).filter(Boolean); const exampleUrl = document.querySelector('#ruleExampleUrl').value.trim();
+    const errorNode = document.querySelector('#ruleError');
+    if (!category) { errorNode.textContent = '请选择规则分类。'; return; }
+    if (!titleZh && !titleEn) { errorNode.textContent = '至少填写中文或英文名称，之后可再补齐另一种语言。'; return; }
+    if (exampleUrl && !isConcretePenpaPuzzleUrl(exampleUrl)) { errorNode.textContent = '例题必须是具体的 Penpa 谜题链接（请勿填写首页或其他谜题平台）。'; return; }
+    const payload = { titleZh, titleEn, category, rulesZh, rulesEn, exampleUrl, isVariant, baseRuleId, ...(editing ? { expectedRevisions: rule.revisions, expectedEditVersion: rule.editVersion } : {}) };
+    const requestEpoch = state.sessionEpoch; const userId = state.user?.id;
+    const saveButton = document.querySelector('#saveRuleButton'); saveButton.disabled = true; saveButton.textContent = editing ? '正在保存…' : '正在创建…';
+    try {
+      const data = await apiRequest(editing ? `/api/rules/${encodeURIComponent(rule.id)}` : '/api/rules', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      if (Array.isArray(data.rules)) state.rules = data.rules;
+      else if (data.rule) state.rules = editing ? state.rules.map((item) => String(item.id) === String(rule.id) ? data.rule : item) : [...state.rules, data.rule];
+      else await refreshRules(requestEpoch, userId);
+      const savedRule = data.rule || state.rules.find((item) => String(item.id) === String(rule?.id || data.id));
+      const changedAuditItems = editing && savedRule?.revisions ? ['name', 'description', 'example'].filter((item) => savedRule.revisions[item] !== rule.revisions?.[item]) : [];
+      const saveMessage = !editing ? '规则草稿已创建。' : changedAuditItems.length ? `已保存；${changedAuditItems.map((item) => auditLabels[item]).join('、')}审核重新开始，其他项进度保留。` : '已保存；审核进度保持不变。';
+      const editorStillOpen = errorNode.isConnected;
+      if (editorStillOpen) closeModal();
+      if (fromSubmission && editorStillOpen) openAddPuzzle(state.submissionDraft?.scope || 'calendar', { ...(state.submissionDraft?.draft || draft || {}), ruleId: savedRule?.id || '' });
+      else { renderRoute(); if (editorStillOpen) showToast(saveMessage); }
+      state.submissionDraft = null;
+    } catch (error) {
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      if (error.status === 409) { if (errorNode.isConnected) closeModal(); try { await refreshRules(requestEpoch, userId); } catch { if (!isCurrentUserSession(requestEpoch, userId)) return; showToast('这条规则版本已更新，但刷新目录失败；请稍后重试。'); return; } if (!isCurrentUserSession(requestEpoch, userId)) return; renderRoute(); showToast('这条规则已被其他成员修改，目录已刷新；请基于最新版本重新编辑。'); return; }
+      if (errorNode.isConnected) errorNode.textContent = error.message;
+      if (errorNode.isConnected) { saveButton.disabled = false; saveButton.textContent = editing ? '保存修改' : '保存规则草稿'; }
+    }
   });
+}
+async function refreshRules(epoch = state.sessionEpoch, userId = state.user?.id) { const data = await apiRequest('/api/rules'); if (!isCurrentUserSession(epoch, userId)) return false; state.rules = data.rules || []; return true; }
+function bindRuleCatalog() {
+  document.querySelectorAll('[data-rule-edit]').forEach((button) => button.addEventListener('click', () => {
+    const rule = state.rules.find((item) => String(item.id) === String(button.dataset.ruleEdit));
+    if (rule) openRuleEditor({ rule });
+  }));
+  document.querySelectorAll('[data-rule-filter]').forEach((button) => button.addEventListener('click', () => { state.ruleFilter = button.dataset.ruleFilter; renderRoute(); }));
+  const search = document.querySelector('#ruleSearch');
+  search?.addEventListener('input', () => {
+    const start = search.selectionStart; const end = search.selectionEnd;
+    state.ruleQuery = search.value;
+    renderRoute();
+    const next = document.querySelector('#ruleSearch'); next?.focus(); next?.setSelectionRange(start, end);
+  });
+  document.querySelectorAll('[data-rule-audit]').forEach((button) => button.addEventListener('click', () => {
+    if (button.dataset.ruleAudit === 'approve') submitRuleAudit(button.dataset.ruleId, button.dataset.auditItem, 'approve');
+    else openAuditReject(button.dataset.ruleId, button.dataset.auditItem);
+  }));
+}
+function openAuditReject(ruleId, item) {
+  const rule = state.rules.find((entry) => String(entry.id) === String(ruleId)); if (!rule) return;
+  openModal(`<p class="modal-eyebrow">RULE AUDIT · ${auditLabels[item]}</p><h2 id="modalTitle">打回并提供建议</h2><p class="modal-intro">打回后，这个审核项需要实际修改内容才能重新开始审核。建议可以留空；现有批准也会保留在历史记录中。</p><label class="form-field"><span>审计建议（可选）</span><textarea id="auditSuggestion" rows="4" maxlength="500" placeholder="指出建议补充或修改的内容"></textarea></label><div class="modal-error" id="auditError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('确认打回', 'confirmAuditReject')}</div>`);
+  document.querySelector('#confirmAuditReject').addEventListener('click', () => submitRuleAudit(ruleId, item, 'reject', document.querySelector('#auditSuggestion').value.trim(), document.querySelector('#auditError')));
+}
+async function submitRuleAudit(ruleId, item, decision, suggestion = '', errorNode = null) {
+  const rule = state.rules.find((entry) => String(entry.id) === String(ruleId)); if (!rule) return;
+  const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const revision = rule.revisions?.[item];
+  try {
+    await apiRequest(`/api/rules/${encodeURIComponent(ruleId)}/audits`, { method: 'POST', body: JSON.stringify({ item, decision, ...(decision === 'reject' ? { suggestion } : {}), revision }) });
+    if (!isCurrentUserSession(requestEpoch, userId)) return;
+    await refreshRules(requestEpoch, userId);
+    if (!isCurrentUserSession(requestEpoch, userId)) return;
+    if (decision === 'reject' && errorNode?.isConnected) closeModal();
+    renderRoute(); showToast(decision === 'approve' ? '审核通过已记录。' : '打回建议已记录；本项内容需实际修改后才能重新审核。');
+  } catch (error) {
+    if (!isCurrentUserSession(requestEpoch, userId)) return;
+    if (error.status === 409) { if (decision === 'reject' && errorNode?.isConnected) closeModal(); try { await refreshRules(requestEpoch, userId); } catch { if (isCurrentUserSession(requestEpoch, userId)) showToast('审核版本已更新，但刷新目录失败；请稍后重试。'); return; } if (isCurrentUserSession(requestEpoch, userId)) { renderRoute(); showToast('审核内容已更新，已刷新当前版本；请核对后重新操作。'); } return; }
+    if (errorNode?.isConnected) errorNode.textContent = error.message;
+    else showToast(error.message);
+  }
 }
 function bindPuzzle(number, scope = 'library') {
   const isCalendar = scope === 'calendar'; const puzzle = (isCalendar ? state.calendarPuzzles : state.puzzles).find((item) => Number(item.number) === Number(number));
@@ -229,7 +328,7 @@ function renderRoute() {
   if (state.serviceError) { app.innerHTML = `<div class="page-wrap-inner"><div class="error-state" role="alert"><strong>私人数据暂时无法加载</strong><p>${esc(state.serviceError)}</p><button class="button button-light" type="button" id="retryPrivateButton">重试</button></div></div>`; document.querySelector('#retryPrivateButton')?.addEventListener('click', loadPrivateData); return; }
   app.innerHTML = route.name === 'rules' ? renderRules() : route.name === 'calendar-puzzle' ? renderPuzzlePage(route.number, 'calendar') : renderCalendar(route.name === 'pending');
   if (['calendar', 'pending'].includes(route.name)) bindCalendar();
-  if (route.name === 'rules') document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor());
+  if (route.name === 'rules') { document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor()); bindRuleCatalog(); }
   if (route.name === 'calendar-puzzle') bindPuzzle(route.number, 'calendar');
 }
 function bindFiles() { document.querySelector('#newFolderButton')?.addEventListener('click', openNewFolder); document.querySelector('#newFolderCard')?.addEventListener('click', openNewFolder); document.querySelectorAll('[data-folder]').forEach((folder) => folder.addEventListener('click', () => { state.filePath = ['全部文件', folder.querySelector('strong').textContent]; renderRoute(); showToast(`已打开文件夹：${state.filePath[1]}`); })); document.querySelector('[data-file-home]')?.addEventListener('click', () => { state.filePath = ['全部文件']; renderRoute(); }); document.querySelector('#sortFilesButton')?.addEventListener('click', (event) => { event.currentTarget.textContent = event.currentTarget.textContent === '按最近更新' ? '按名称排序' : '按最近更新'; showToast('文件排序方式已切换'); }); }

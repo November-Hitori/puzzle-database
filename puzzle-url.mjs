@@ -64,6 +64,11 @@ export function hasConcretePuzzlePayload(value) {
   return hasQuery || (pathname !== '/' && pathname !== '/penpa-edit/' && pathname !== '/pedit-v2/');
 }
 
+export function isConcretePenpaPuzzleUrl(value) {
+  const url=parseTrustedPuzzleUrl(value);
+  return Boolean(url && !url.port && getPuzzleSource(url.href)==='penpa+' && hasConcretePuzzlePayload(url.href));
+}
+
 export function getPuzzleSource(value) {
   const url = parseTrustedPuzzleUrl(value);
   if (!url) return '';

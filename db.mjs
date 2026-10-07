@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_REQUIRED_APPROVALS } from './rule-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir, 'data');
@@ -91,7 +92,12 @@ database.exec(`
     rules_en TEXT NOT NULL,
     category TEXT NOT NULL CHECK (category IN ('涂黑','填数','分区','置物','路径','其它')),
     is_variant INTEGER NOT NULL CHECK (is_variant IN (0,1)),
-    base_rule_id INTEGER REFERENCES rules(id)
+    base_rule_id INTEGER REFERENCES rules(id),
+    example_url TEXT NOT NULL DEFAULT '',
+    name_revision INTEGER NOT NULL DEFAULT 1,
+    description_revision INTEGER NOT NULL DEFAULT 1,
+    example_revision INTEGER NOT NULL DEFAULT 1,
+    edit_version INTEGER NOT NULL DEFAULT 1
   );
   CREATE TABLE IF NOT EXISTS member_sessions (
     token_hash TEXT PRIMARY KEY,
@@ -114,6 +120,36 @@ database.exec(`
     pending_legacy_user_id TEXT REFERENCES trusted_users(id),
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS rule_item_revisions (
+    rule_id INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+    item TEXT NOT NULL CHECK(item IN ('name','description','example')),
+    revision INTEGER NOT NULL CHECK(revision>0),
+    content_json TEXT NOT NULL,
+    changed_by_user_id TEXT REFERENCES trusted_users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(rule_id,item,revision)
+  );
+  CREATE TABLE IF NOT EXISTS rule_item_votes (
+    rule_id INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+    item TEXT NOT NULL CHECK(item IN ('name','description','example')),
+    revision INTEGER NOT NULL CHECK(revision>0),
+    user_id TEXT NOT NULL REFERENCES trusted_users(id),
+    decision TEXT NOT NULL CHECK(decision IN ('approve','reject')),
+    suggestion TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(rule_id,item,revision,user_id)
+  );
+  CREATE TABLE IF NOT EXISTS rule_item_audit_events (
+    id INTEGER PRIMARY KEY,
+    rule_id INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+    item TEXT NOT NULL CHECK(item IN ('name','description','example')),
+    revision INTEGER NOT NULL CHECK(revision>0),
+    user_id TEXT NOT NULL REFERENCES trusted_users(id),
+    decision TEXT NOT NULL CHECK(decision IN ('approve','reject')),
+    suggestion TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Additive migration for databases created by the original prototype.
@@ -127,6 +163,17 @@ for (const [name, definition] of [['username', 'TEXT'], ['username_key', 'TEXT']
   if (!trustedUserColumns.has(name)) database.exec(`ALTER TABLE trusted_users ADD COLUMN ${name} ${definition}`);
 }
 database.exec("CREATE UNIQUE INDEX IF NOT EXISTS trusted_users_username_key ON trusted_users(username_key) WHERE username_key IS NOT NULL");
+const ruleColumns=new Set(database.prepare('PRAGMA table_info(rules)').all().map((column)=>column.name));
+for (const [name,definition] of [['example_url',"TEXT NOT NULL DEFAULT ''"],['name_revision','INTEGER NOT NULL DEFAULT 1'],['description_revision','INTEGER NOT NULL DEFAULT 1'],['example_revision','INTEGER NOT NULL DEFAULT 1'],['edit_version','INTEGER NOT NULL DEFAULT 1']]) {
+  if (!ruleColumns.has(name)) database.exec(`ALTER TABLE rules ADD COLUMN ${name} ${definition}`);
+}
+const seedRuleRevision=database.prepare(`INSERT OR IGNORE INTO rule_item_revisions(rule_id,item,revision,content_json)
+  VALUES (?,?,?,?)`);
+for (const row of database.prepare('SELECT * FROM rules').all()) {
+  seedRuleRevision.run(row.id,'name',row.name_revision,JSON.stringify({titleZh:row.title_zh,titleEn:row.title_en}));
+  seedRuleRevision.run(row.id,'description',row.description_revision,JSON.stringify({rulesZh:JSON.parse(row.rules_zh),rulesEn:JSON.parse(row.rules_en),isVariant:Boolean(row.is_variant),baseRuleId:row.base_rule_id}));
+  seedRuleRevision.run(row.id,'example',row.example_revision,JSON.stringify({exampleUrl:row.example_url}));
+}
 
 const puzzleCount = database.prepare('SELECT COUNT(*) AS count FROM puzzles').get().count;
 if (puzzleCount === 0) {
@@ -233,22 +280,133 @@ const ruleFromRow = (row) => row && ({
   id: row.id, titleZh: row.title_zh, titleEn: row.title_en,
   rulesZh: JSON.parse(row.rules_zh), rulesEn: JSON.parse(row.rules_en),
   category: row.category, isVariant: Boolean(row.is_variant), baseRuleId: row.base_rule_id,
+  exampleUrl: row.example_url,
+  editVersion: row.edit_version,
+  revisions: {name:row.name_revision,description:row.description_revision,example:row.example_revision},
   ...(row.base_title_zh ? { baseRuleTitleZh: row.base_title_zh } : {}),
   ...(row.base_title_en ? { baseRuleTitleEn: row.base_title_en } : {})
 });
 
-export function getRules() {
-  return database.prepare(`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en
-    FROM rules r LEFT JOIN rules b ON b.id = r.base_rule_id ORDER BY r.id`).all().map(ruleFromRow);
+function contentForRule(rule,item) {
+  if (item==='name') return {titleZh:rule.titleZh,titleEn:rule.titleEn};
+  if (item==='description') return {rulesZh:rule.rulesZh,rulesEn:rule.rulesEn,isVariant:rule.isVariant,baseRuleId:rule.baseRuleId};
+  return {exampleUrl:rule.exampleUrl};
 }
-export function getRule(id) {
+function attachRuleQuality(rule,userId) {
+  if (!rule) return null;
+  const errors=getRuleFieldErrors(rule);
+  const fieldNames={name:'名称',description:'说明',example:'例题'};
+  const groups={};
+  for (const item of RULE_AUDIT_ITEMS) {
+    const revision=rule.revisions[item];
+    const currentReviews=database.prepare(`SELECT v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
+        (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
+      FROM rule_item_votes v JOIN trusted_users u ON u.id=v.user_id
+      WHERE v.rule_id=? AND v.item=? AND v.revision=? ORDER BY v.created_at,v.user_id`).all(rule.id,item,revision).map((review)=>({...review,active:Boolean(review.active)}));
+    const history=database.prepare(`SELECT e.user_id AS userId,u.name,u.username,e.revision,e.decision,e.suggestion,e.created_at AS createdAt
+      FROM rule_item_audit_events e JOIN trusted_users u ON u.id=e.user_id
+      WHERE e.rule_id=? AND e.item=? ORDER BY e.id`).all(rule.id,item);
+    const revisions=database.prepare(`SELECT r.revision,r.content_json AS content,r.changed_by_user_id AS changedByUserId,u.name AS changedByName,u.username AS changedByUsername,r.created_at AS createdAt
+      FROM rule_item_revisions r LEFT JOIN trusted_users u ON u.id=r.changed_by_user_id
+      WHERE r.rule_id=? AND r.item=? ORDER BY r.revision`).all(rule.id,item).map((row)=>({
+        revision:row.revision,content:JSON.parse(row.content),
+        changedBy:row.changedByUserId?{userId:row.changedByUserId,name:row.changedByName,username:row.changedByUsername}:null,
+        createdAt:row.createdAt
+      }));
+    const rejected=currentReviews.some((review)=>review.decision==='reject');
+    const complete=isRuleItemComplete(rule,item);
+    const approvalCount=currentReviews.filter((review)=>review.decision==='approve'&&review.active).length;
+    const status=rejected?'rejected':!complete?'incomplete':approvalCount>=RULE_REQUIRED_APPROVALS?'approved':'pending';
+    const rejectionSuggestion=[...currentReviews].reverse().find((review)=>review.decision==='reject')?.suggestion||'';
+    groups[item]={revision,status,approvalCount,requiredApprovals:RULE_REQUIRED_APPROVALS,rejected,
+      reviewedByCurrentUser:Boolean(userId&&currentReviews.some((review)=>review.userId===userId)),
+      currentReviews,history,revisions,rejectionSuggestion};
+    if (rejected) errors.push({code:'auditRejected',item,message:`审计未通过：${fieldNames[item]}`});
+  }
+  const warnings=[];
+  for (const item of RULE_AUDIT_ITEMS) {
+    if (groups[item].status!=='approved') warnings.push({code:`${item}NotFullyAudited`,item,message:`${fieldNames[item]}尚未完成三人审计`});
+  }
+  return {...rule,quality:{errors,warnings,groups}};
+}
+function selectRule(id) {
   return ruleFromRow(database.prepare(`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en
     FROM rules r LEFT JOIN rules b ON b.id = r.base_rule_id WHERE r.id = ?`).get(id));
 }
-export function addRule(input) {
-  const result = database.prepare(`INSERT INTO rules (title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id)
-    VALUES (?,?,?,?,?,?,?)`).run(input.titleZh.trim(), input.titleEn.trim(), JSON.stringify(input.rulesZh.map((s) => s.trim())), JSON.stringify(input.rulesEn.map((s) => s.trim())), input.category, input.isVariant ? 1 : 0, input.baseRuleId ?? null);
-  return getRule(Number(result.lastInsertRowid));
+export function getRules(userId=null) {
+  return database.prepare('SELECT id FROM rules ORDER BY id').all().map(({id})=>attachRuleQuality(selectRule(id),userId));
+}
+export function getRule(id,userId=null) { return attachRuleQuality(selectRule(id),userId); }
+export function ruleHasVariants(id) { return Boolean(database.prepare('SELECT 1 FROM rules WHERE base_rule_id=? LIMIT 1').get(id)); }
+
+export function addRule(input,userId) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const result=database.prepare(`INSERT INTO rules (title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id,example_url)
+      VALUES (?,?,?,?,?,?,?,?)`).run(input.titleZh,input.titleEn,JSON.stringify(input.rulesZh),JSON.stringify(input.rulesEn),input.category,input.isVariant?1:0,input.baseRuleId,input.exampleUrl);
+    const id=Number(result.lastInsertRowid);
+    const save=database.prepare(`INSERT INTO rule_item_revisions(rule_id,item,revision,content_json,changed_by_user_id)
+      VALUES (?,?,1,?,?)`);
+    for (const item of RULE_AUDIT_ITEMS) save.run(id,item,JSON.stringify(contentForRule(input,item)),userId);
+    database.exec('COMMIT');
+    return getRule(id,userId);
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
+}
+
+export function updateRule(id,input,userId,expectedRevisions) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const current=ruleFromRow(database.prepare('SELECT * FROM rules WHERE id=?').get(id));
+    if (!current) { database.exec('ROLLBACK'); return {error:'missing'}; }
+    const next={...current,...input};
+    const changedItems=RULE_AUDIT_ITEMS.filter((item)=>JSON.stringify(contentForRule(current,item))!==JSON.stringify(contentForRule(next,item)));
+    if (expectedRevisions?.expectedEditVersion!==current.editVersion||RULE_AUDIT_ITEMS.some((item)=>expectedRevisions[item]!==current.revisions[item])) { database.exec('ROLLBACK'); return {error:'stale'}; }
+    const nextRevisions={...current.revisions};
+    for (const item of changedItems) nextRevisions[item]+=1;
+    const changed=changedItems.length>0||current.category!==next.category;
+    database.prepare(`UPDATE rules SET title_zh=?,title_en=?,rules_zh=?,rules_en=?,category=?,is_variant=?,base_rule_id=?,example_url=?,
+      name_revision=?,description_revision=?,example_revision=?,edit_version=? WHERE id=?`)
+      .run(next.titleZh,next.titleEn,JSON.stringify(next.rulesZh),JSON.stringify(next.rulesEn),next.category,next.isVariant?1:0,next.baseRuleId,next.exampleUrl,
+        nextRevisions.name,nextRevisions.description,nextRevisions.example,current.editVersion+(changed?1:0),id);
+    const save=database.prepare(`INSERT INTO rule_item_revisions(rule_id,item,revision,content_json,changed_by_user_id)
+      VALUES (?,?,?,?,?)`);
+    for (const item of changedItems) save.run(id,item,nextRevisions[item],JSON.stringify(contentForRule(next,item)),userId);
+    database.exec('COMMIT');
+    return {rule:getRule(id,userId),changedItems,changed};
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
+}
+
+export function submitRuleAudit(id,item,decision,suggestion,revision,userId) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const row=database.prepare('SELECT * FROM rules WHERE id=?').get(id);
+    if (!row) { database.exec('ROLLBACK'); return {error:'missing'}; }
+    const current=ruleFromRow(row);
+    if (!RULE_AUDIT_ITEMS.includes(item)||revision!==current.revisions[item]) { database.exec('ROLLBACK'); return {error:'stale'}; }
+    if (decision!=='approve'&&decision!=='reject') { database.exec('ROLLBACK'); return {error:'invalid'}; }
+    if (decision==='approve'&&!isRuleItemComplete(current,item)) { database.exec('ROLLBACK'); return {error:'incomplete'}; }
+    const existing=database.prepare('SELECT decision,suggestion FROM rule_item_votes WHERE rule_id=? AND item=? AND revision=? AND user_id=?').get(id,item,revision,userId);
+    const anyRejection=database.prepare("SELECT 1 FROM rule_item_votes WHERE rule_id=? AND item=? AND revision=? AND decision='reject' LIMIT 1").get(id,item,revision);
+    if (existing?.decision==='reject'&&decision!=='reject') { database.exec('ROLLBACK'); return {error:'sticky'}; }
+    if (anyRejection&&!existing&&decision==='approve') { database.exec('ROLLBACK'); return {error:'rejected'}; }
+    if (existing&&existing.decision===decision&&existing.suggestion===suggestion) {
+      database.exec('COMMIT');
+      return {rule:getRule(id,userId),changed:false};
+    }
+    if (existing&&existing.decision==='approve'&&decision==='approve') {
+      database.exec('COMMIT');
+      return {rule:getRule(id,userId),changed:false};
+    }
+    const now=new Date().toISOString();
+    if (existing) database.prepare(`UPDATE rule_item_votes SET decision=?,suggestion=?,updated_at=?
+      WHERE rule_id=? AND item=? AND revision=? AND user_id=?`).run(decision,suggestion,now,id,item,revision,userId);
+    else database.prepare(`INSERT INTO rule_item_votes(rule_id,item,revision,user_id,decision,suggestion,updated_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id,item,revision,userId,decision,suggestion,now);
+    database.prepare(`INSERT INTO rule_item_audit_events(rule_id,item,revision,user_id,decision,suggestion,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id,item,revision,userId,decision,suggestion,now);
+    database.exec('COMMIT');
+    return {rule:getRule(id,userId),changed:true};
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 
 function puzzleByNumber(number, userId, scope) {

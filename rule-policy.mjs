@@ -1,0 +1,24 @@
+import { isConcretePenpaPuzzleUrl } from './puzzle-url.mjs';
+
+export const RULE_AUDIT_ITEMS=Object.freeze(['name','description','example']);
+export const RULE_REQUIRED_APPROVALS=3;
+
+export function getRuleFieldErrors(rule) {
+  const errors=[];
+  if (!String(rule.titleZh||'').trim()) errors.push({code:'missingZhName',item:'name',message:'缺少中文名称'});
+  if (!String(rule.titleEn||'').trim()) errors.push({code:'missingEnName',item:'name',message:'缺少英文名称'});
+  if (!Array.isArray(rule.rulesZh)||!rule.rulesZh.some((clause)=>String(clause).trim())) errors.push({code:'missingZhDescription',item:'description',message:'缺少中文说明'});
+  if (!Array.isArray(rule.rulesEn)||!rule.rulesEn.some((clause)=>String(clause).trim())) errors.push({code:'missingEnDescription',item:'description',message:'缺少英文说明'});
+  if (rule.isVariant && !rule.baseRuleId) errors.push({code:'missingVariantBase',item:'description',message:'变体缺少基础规则'});
+  if (!String(rule.exampleUrl||'').trim()) errors.push({code:'missingExample',item:'example',message:'缺少例题链接'});
+  return errors;
+}
+
+export function isRuleItemComplete(rule,item) {
+  const errors=getRuleFieldErrors(rule);
+  return !errors.some((error)=>error.item===item);
+}
+
+export function validateRuleExampleUrl(value) {
+  return typeof value==='string' && (value.trim()==='' || (value.length<=3000 && isConcretePenpaPuzzleUrl(value.trim())));
+}

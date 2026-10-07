@@ -8,9 +8,10 @@ import {
   addCalendarPuzzle, addFolder, addPuzzle, addPuzzleTag, addRule, calendarPuzzleExists,
   authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
-  getRules, getTags, registerAccountWithGate, updateCalendarSuggestedDate
+  getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate, updateRule
 } from './db.mjs';
 import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
+import { validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 
@@ -20,7 +21,7 @@ const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'truste
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
 const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs']);
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs']);
 const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
@@ -117,15 +118,39 @@ function validDate(value) {
   const [y,m,d]=value.split('-').map(Number); const dt=new Date(Date.UTC(y,m-1,d));
   return dt.getUTCFullYear()===y && dt.getUTCMonth()===m-1 && dt.getUTCDate()===d;
 }
-function validateRule(input) {
-  if (!validText(input.titleZh,160,true)||!validText(input.titleEn,160,true)) return 'titleZh and titleEn are required';
-  for (const key of ['rulesZh','rulesEn']) if (!Array.isArray(input[key])||!input[key].length||input[key].length>30||input[key].some((v)=>!validText(v,1000,true))) return `${key} must contain non-empty clauses`;
-  if (input.rulesZh.length!==input.rulesEn.length) return 'Chinese and English clause counts must match';
-  if (!categories.has(input.category)) return 'invalid category';
-  if (typeof input.isVariant!=='boolean') return 'isVariant must be boolean';
-  if (input.isVariant) { const base=Number(input.baseRuleId); const rule=Number.isInteger(base)?getRule(base):null; if (!rule||rule.isVariant) return 'variant must reference an existing original rule'; }
-  else if (input.baseRuleId!==undefined && input.baseRuleId!==null && input.baseRuleId!=='') return 'original rules cannot have a base rule';
-  return null;
+function normalizeRuleInput(input,previous=null,ruleId=null) {
+  const takeText=(key,max,fallback='')=>{
+    const value=Object.hasOwn(input,key)?input[key]:(previous?.[key]??fallback);
+    if (value===null&&key==='exampleUrl') return {value:''};
+    if (!validText(value,max)) return {error:`invalid ${key}`};
+    return {value:value.trim()};
+  };
+  const titleZh=takeText('titleZh',160),titleEn=takeText('titleEn',160),exampleUrl=takeText('exampleUrl',3000);
+  if (titleZh.error||titleEn.error||exampleUrl.error) return {error:titleZh.error||titleEn.error||exampleUrl.error};
+  if (!titleZh.value&&!titleEn.value) return {error:'at least one Chinese or English name is required'};
+  const clauses={};
+  for (const key of ['rulesZh','rulesEn']) {
+    const value=Object.hasOwn(input,key)?input[key]:(previous?.[key]??[]);
+    if (!Array.isArray(value)||value.length>30||value.some((clause)=>!validText(clause,1000))) return {error:`invalid ${key}`};
+    clauses[key]=value.map((clause)=>clause.trim()).filter(Boolean);
+  }
+  const category=Object.hasOwn(input,'category')?input.category:(previous?.category??'');
+  if (!categories.has(category)) return {error:'category is required'};
+  let isVariant=Object.hasOwn(input,'isVariant')?input.isVariant:(previous?.isVariant??false);
+  if (typeof isVariant!=='boolean') return {error:'isVariant must be boolean'};
+  let baseRuleId=Object.hasOwn(input,'baseRuleId')?input.baseRuleId:(previous?.baseRuleId??null);
+  if (input.isVariant===false&&!Object.hasOwn(input,'baseRuleId')) baseRuleId=null;
+  if (!isVariant) {
+    if (baseRuleId!==undefined&&baseRuleId!==null&&baseRuleId!=='') return {error:'original rules cannot have a base rule'};
+    baseRuleId=null;
+  } else if (baseRuleId!==undefined&&baseRuleId!==null&&baseRuleId!=='') {
+    baseRuleId=Number(baseRuleId);
+    const base=Number.isInteger(baseRuleId)?getRule(baseRuleId):null;
+    if (!base||base.isVariant||baseRuleId===ruleId) return {error:'variant base must be an existing original rule'};
+  } else baseRuleId=null;
+  if (previous&&!previous.isVariant&&isVariant&&ruleHasVariants(ruleId)) return {error:'a rule used as another variant base cannot itself become a variant'};
+  if (exampleUrl.value&&!validateRuleExampleUrl(exampleUrl.value)) return {error:'exampleUrl must be a concrete Penpa puzzle URL'};
+  return {value:{titleZh:titleZh.value,titleEn:titleEn.value,...clauses,category,isVariant,baseRuleId,exampleUrl:exampleUrl.value}};
 }
 function ensurePublicPuzzle(number) { return Boolean(getPuzzles('scope-check').some((p)=>p.number===number)); }
 function validateRatings(input) { return ['logic','intuition','enjoyment'].every((key)=>Number.isInteger(input[key])&&input[key]>=1&&input[key]<=5); }
@@ -202,12 +227,39 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   const collectionMatch=pathname.match(/^\/api\/collections\/(\d+)$/);
   if (request.method==='GET' && collectionMatch) { const collection=getCollection(Number(collectionMatch[1]),user.id); return collection?sendJson(response,200,{collection}):sendJson(response,404,{error:'collection not found'}); }
 
-  if (request.method==='GET' && pathname==='/api/rules') return sendJson(response,200,{rules:getRules()});
+  if (request.method==='GET' && pathname==='/api/rules') return sendJson(response,200,{rules:getRules(user.id)});
   const ruleMatch=pathname.match(/^\/api\/rules\/(\d+)$/);
-  if (request.method==='GET' && ruleMatch) { const rule=getRule(Number(ruleMatch[1])); return rule?sendJson(response,200,{rule}):sendJson(response,404,{error:'rule not found'}); }
+  if (request.method==='GET' && ruleMatch) { const rule=getRule(Number(ruleMatch[1]),user.id); return rule?sendJson(response,200,{rule}):sendJson(response,404,{error:'rule not found'}); }
   if (request.method==='POST' && pathname==='/api/rules') {
-    const input=await readJson(request), error=validateRule(input); if (error) return sendJson(response,400,{error});
-    const rule=addRule(input); return sendJson(response,201,{rule,rules:getRules()});
+    const input=await readJson(request), normalized=normalizeRuleInput(input);
+    if (normalized.error) return sendJson(response,400,{error:normalized.error});
+    const rule=addRule(normalized.value,user.id); return sendJson(response,201,{rule,rules:getRules(user.id)});
+  }
+  if (request.method==='PATCH'&&ruleMatch) {
+    const id=Number(ruleMatch[1]),input=await readJson(request),previous=getRule(id,user.id);
+    if (!previous) return sendJson(response,404,{error:'rule not found'});
+    const expected=input.expectedRevisions;
+    if (!expected||typeof expected!=='object'||!Number.isInteger(input.expectedEditVersion)||input.expectedEditVersion<1||['name','description','example'].some((item)=>!Number.isInteger(expected[item])||expected[item]<1)) return sendJson(response,400,{error:'expectedEditVersion and expectedRevisions for name, description, and example are required'});
+    expected.expectedEditVersion=input.expectedEditVersion;
+    const fields={...input}; delete fields.expectedRevisions;
+    const normalized=normalizeRuleInput(fields,previous,id);
+    if (normalized.error) return sendJson(response,400,{error:normalized.error});
+    const result=updateRule(id,normalized.value,user.id,expected);
+    if (result.error==='missing') return sendJson(response,404,{error:'rule not found'});
+    if (result.error) return sendJson(response,409,{error:'rule revisions changed; reload before editing'});
+    return sendJson(response,200,{rule:result.rule,rules:getRules(user.id)});
+  }
+  const auditMatch=pathname.match(/^\/api\/rules\/(\d+)\/audits$/);
+  if (request.method==='POST'&&auditMatch) {
+    const input=await readJson(request),suggestion=input.suggestion===undefined?'':input.suggestion;
+    if (!['name','description','example'].includes(input.item)||!['approve','reject'].includes(input.decision)||!Number.isInteger(input.revision)||input.revision<1||!validText(suggestion,2000)) return sendJson(response,400,{error:'invalid rule audit'});
+    const result=submitRuleAudit(Number(auditMatch[1]),input.item,input.decision,suggestion.trim(),input.revision,user.id);
+    if (result.error==='missing') return sendJson(response,404,{error:'rule not found'});
+    if (result.error==='stale') return sendJson(response,409,{error:'rule revision changed; reload before auditing'});
+    if (result.error==='incomplete') return sendJson(response,400,{error:'cannot approve an incomplete rule item'});
+    if (result.error==='sticky'||result.error==='rejected') return sendJson(response,409,{error:'rejected item requires a content edit before further approval'});
+    if (result.error) return sendJson(response,400,{error:'invalid rule audit'});
+    return sendJson(response,200,{rule:result.rule,rules:getRules(user.id)});
   }
 
   if (request.method==='GET' && pathname==='/api/calendar/puzzles') return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});

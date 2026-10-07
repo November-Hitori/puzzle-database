@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getPuzzleSource, hasConcretePuzzlePayload, parseTrustedPuzzleUrl } from '../puzzle-url.mjs';
+import { getPuzzleSource, hasConcretePuzzlePayload, isConcretePenpaPuzzleUrl, parseTrustedPuzzleUrl } from '../puzzle-url.mjs';
 
 test('accepts supported puzzle tool URLs', () => {
   assert.equal(parseTrustedPuzzleUrl('https://puzz.link/p?slither/')?.hostname, 'puzz.link');
@@ -32,4 +32,16 @@ test('detects concrete puzzle payloads for iframe rendering', () => {
   assert.equal(hasConcretePuzzlePayload('https://pzprxs.vercel.app/p?slither/6/6/'), true);
   assert.equal(hasConcretePuzzlePayload('https://swaroopg92.github.io/penpa-edit/'), false);
   assert.equal(hasConcretePuzzlePayload('https://swaroopg92.github.io/penpa-edit/?m=edit&p=abc'), true);
+});
+
+test('accepts only concrete supported Penpa examples without credentials or non-default ports',()=>{
+  assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com/?m=edit&p=example'),true);
+  assert.equal(isConcretePenpaPuzzleUrl('https://opt-pan.github.io/penpa-edit/?m=edit&p=example'),true);
+  assert.equal(isConcretePenpaPuzzleUrl(''),false);
+  assert.equal(isConcretePenpaPuzzleUrl('javascript:alert(1)'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com/'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com.evil.example/?m=edit&p=1'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://user:pass@penpa-edit.com/?m=edit&p=1'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com:8443/?m=edit&p=1'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://puzz.link/p?slither/6/6/abc'),false);
 });

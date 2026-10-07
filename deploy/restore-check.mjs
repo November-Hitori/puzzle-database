@@ -19,7 +19,7 @@ try {
   const storedIds=tableExists('trusted_users')?new Set(db.prepare('SELECT id FROM trusted_users').all().map((row)=>row.id)):new Set();
   if (members.some((member) => !storedIds.has(member.id))) throw new Error('A configured legacy member is missing from the SQLite identity registry');
   const counts = {};
-  for (const table of ['puzzles', 'puzzle_ratings', 'puzzle_completions', 'folders', 'collections', 'rules', 'trusted_users', 'registration_gate']) {
+  for (const table of ['puzzles', 'puzzle_ratings', 'puzzle_completions', 'folders', 'collections', 'rules', 'trusted_users', 'registration_gate', 'rule_item_revisions', 'rule_item_votes', 'rule_item_audit_events']) {
     try {
       counts[table] = db.prepare(`SELECT count(*) AS count FROM "${table}"`).get().count;
     } catch (error) {
