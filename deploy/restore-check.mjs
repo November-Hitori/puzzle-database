@@ -19,7 +19,7 @@ try {
   const storedIds=tableExists('trusted_users')?new Set(db.prepare('SELECT id FROM trusted_users').all().map((row)=>row.id)):new Set();
   if (members.some((member) => !storedIds.has(member.id))) throw new Error('A configured legacy member is missing from the SQLite identity registry');
   const counts = {};
-  for (const table of ['puzzles', 'puzzle_ratings', 'puzzle_completions', 'folders', 'collections', 'rules', 'trusted_users', 'registration_gate', 'rule_item_revisions', 'rule_item_votes', 'rule_item_audit_events']) {
+  for (const table of ['puzzles', 'puzzle_ratings', 'puzzle_completions', 'folders', 'collections', 'rules', 'trusted_users', 'registration_gate', 'rule_item_revisions', 'rule_item_votes', 'rule_item_audit_events', 'entity_id_sequences', 'calendar_review_schema_migrations', 'calendar_evaluations', 'calendar_review_votes', 'calendar_review_vote_events', 'rule_creator_schema_migrations', 'user_notifications']) {
     try {
       counts[table] = db.prepare(`SELECT count(*) AS count FROM "${table}"`).get().count;
     } catch (error) {
@@ -33,6 +33,12 @@ try {
   } catch (error) {
     if (!String(error.message).includes('no such column')) throw error;
     counts.calendar_puzzles=0;
+  }
+  try {
+    counts.calendar_statuses=Object.fromEntries(db.prepare("SELECT calendar_status,count(*) AS count FROM puzzles WHERE scope='calendar' GROUP BY calendar_status").all().map((row)=>[row.calendar_status,row.count]));
+  } catch (error) {
+    if (!String(error.message).includes('no such column')) throw error;
+    counts.calendar_statuses={};
   }
   try {
     counts.registered_users=db.prepare('SELECT count(*) AS count FROM trusted_users WHERE password_hash IS NOT NULL AND is_active=1').get().count;

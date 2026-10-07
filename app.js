@@ -1,10 +1,12 @@
 import { getPuzzleSource, hasConcretePuzzlePayload, isConcretePenpaPuzzleUrl, parseTrustedPuzzleUrl } from './puzzle-url.mjs';
 import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
+import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES } from './calendar-review-policy.mjs';
 
 const state = {
   puzzles: [],
   calendarPuzzles: [],
+  calendarLeftovers: [],
   rules: [],
   folders: [],
   visible: 6,
@@ -25,6 +27,15 @@ const state = {
   sessionEpoch: 0,
   calendarSort: 'date',
   calendarReturnRoute: 'calendar',
+  inboxItems: [],
+  inboxUnreadCount: 0,
+  inboxNextBefore: null,
+  inboxLoading: false,
+  inboxError: '',
+  inboxActionError: '',
+  inboxPendingIds: new Set(),
+  inboxReadAllPending: false,
+  lastPrivateRouteName: null,
   ruleFilter: 'all',
   ruleQuery: '',
   submissionDraft: null
@@ -60,10 +71,10 @@ async function apiRequest(path, options = {}) {
 }
 function applyPuzzleData(puzzles) { state.puzzles = puzzles.map((puzzle) => ({ ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), tags: puzzle.tags || [], userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0) })); }
 async function bootstrapDatabase() { clearPrivateState(); const epoch = ++state.sessionEpoch; state.sessionChecked = false; state.authError = ''; renderRoute(); try { const session = await apiRequest('/api/session'); if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = session.user || null; if (!state.user) { renderRoute(); return; } normalizeAuthenticatedRoute(); renderRoute(); await loadPrivateData(); } catch (error) { if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = null; state.serviceError = error.message || '服务暂不可用'; renderRoute(); } }
-async function loadPrivateData() { if (!state.user) return; const epoch = state.sessionEpoch; const userId = state.user.id; state.privateLoading = true; state.serviceError = ''; renderRoute(); try { const [ruleData, calendarData] = await Promise.all([apiRequest('/api/rules'), apiRequest('/api/calendar/puzzles')]); if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.rules = ruleData.rules || []; state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle); state.privateLoading = false; renderRoute(); } catch (error) { if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.privateLoading = false; state.serviceError = error.message || '无法加载私人数据'; renderRoute(); } }
+async function loadPrivateData() { if (!state.user) return; const epoch = state.sessionEpoch; const userId = state.user.id; state.privateLoading = true; state.serviceError = ''; renderRoute(); try { const [ruleData, calendarData, leftoverData, inboxData] = await Promise.all([apiRequest('/api/rules'), apiRequest('/api/calendar/puzzles'), apiRequest('/api/calendar/leftovers'), apiRequest('/api/inbox?limit=20')]); if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.rules = ruleData.rules || []; state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle); state.calendarLeftovers = (leftoverData.puzzles || []).map(normalizePuzzle); state.inboxItems = inboxData.notifications || []; state.inboxUnreadCount = Number(inboxData.unreadCount || 0); state.inboxNextBefore = inboxData.nextBefore || null; state.privateLoading = false; state.lastPrivateRouteName = getRoute().name; renderRoute(); } catch (error) { if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.privateLoading = false; state.serviceError = error.message || '无法加载私人数据'; renderRoute(); } }
 function normalizePuzzle(puzzle) { return { ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0), tags: puzzle.tags || [] }; }
 function isCurrentUserSession(epoch, userId) { return epoch === state.sessionEpoch && Boolean(state.user) && String(state.user.id) === String(userId); }
-function clearPrivateState() { state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.calendarReturnRoute = 'calendar'; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function clearPrivateState() { state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
@@ -74,8 +85,8 @@ function closeModal() { modalBackdrop.hidden = true; modalContent.innerHTML = ''
 function button(text, id = '', className = 'button button-dark') { return `<button class="${className}" type="button"${id ? ` id="${id}"` : ''}>${text}</button>`; }
 
 function getRoute() { const hash = window.location.hash.slice(1) || 'home'; const calendarMatch = hash.match(/^calendar-puzzle-(\d+)$/); const puzzleMatch = hash.match(/^puzzle-(\d+)$/); const collectionMatch = hash.match(/^collection-(\d+)$/); if (calendarMatch) return { name: 'calendar-puzzle', number: Number(calendarMatch[1]) }; if (puzzleMatch) return { name: 'puzzle', number: Number(puzzleMatch[1]) }; if (collectionMatch) return { name: 'collection', id: Number(collectionMatch[1]) }; return { name: hash.split('/')[0] || 'home' }; }
-function normalizeAuthenticatedRoute() { const route = getRoute(); if (!['calendar', 'pending', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
-function setBreadcrumb(name) { const labels = { home: '谜题日历', library: '谜题日历', collections: '谜题日历', collection: '谜题日历', files: '谜题日历', records: '谜题日历', authors: '谜题日历', puzzle: '谜题日历', pending: '我的未完成谜题', calendar: '谜题日历', 'calendar-puzzle': '日历谜题', rules: '规则管理' }; const crumb = document.querySelector('#breadcrumbCurrent'); if (crumb) crumb.textContent = labels[name] || '谜题日历'; const activeRoute = name === 'calendar-puzzle' ? 'calendar' : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
+function normalizeAuthenticatedRoute() { const route = getRoute(); if (!['calendar', 'pending', 'leftovers', 'messages', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
+function setBreadcrumb(name) { const labels = { home: '谜题日历', library: '谜题日历', collections: '谜题日历', collection: '谜题日历', files: '谜题日历', records: '谜题日历', authors: '谜题日历', puzzle: '谜题日历', pending: '我的未完成谜题', leftovers: '待重新进入', messages: '收件箱', calendar: '谜题日历', 'calendar-puzzle': state.calendarReturnRoute === 'pending' ? '我的未完成谜题' : state.calendarReturnRoute === 'leftovers' ? '待重新进入' : '日历谜题', rules: '规则管理' }; const crumb = document.querySelector('#breadcrumbCurrent'); if (crumb) crumb.textContent = labels[name] || '谜题日历'; const activeRoute = name === 'calendar-puzzle' ? (state.calendarReturnRoute === 'leftovers' ? 'leftovers' : 'calendar') : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
 
 function filteredPuzzles() {
   const filtered = state.puzzles.filter((puzzle) => { if (state.filter === 'completed') return puzzle.completed; if (state.filter === 'wrong') return puzzle.tags.includes('Wrong Puzzle'); if (state.filter === 'logic') return puzzle.type === '逻辑题'; if (state.filter === 'word') return puzzle.type === '文字题'; return true; });
@@ -92,17 +103,170 @@ function renderLibrary() {
 function renderPuzzleRow(puzzle) { return `<div class="puzzle-row ${puzzle.completed ? 'completed' : ''}" role="row"><span class="cell-number" role="cell">#${puzzle.number}</span><div class="puzzle-main" role="cell"><a class="puzzle-title" href="#puzzle-${puzzle.number}">${esc(puzzle.title)}</a><span class="puzzle-subtitle">${esc(puzzle.type)} · ${esc(puzzle.source)}</span></div><span class="cell-author" role="cell"><a class="author-link" href="#authors">${esc(puzzle.author)}</a></span><span class="cell-tags" role="cell">${tagMarkup(puzzle.tags)}</span><span class="cell-rating" role="cell">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><a class="row-action" title="打开详情" aria-label="打开 ${esc(puzzle.title)}" href="#puzzle-${puzzle.number}">›</a></div>`; }
 
 const ruleCategories = ['涂黑', '填数', '分区', '置物', '路径', '其它'];
+function calendarStatusLabel(status) { return ({ pending: '审核中', approved: '已通过', leftover: '待重新进入' })[status] || '审核中'; }
+function calendarDateLabel(puzzle) {
+  if (puzzle.suggestedDate) return String(puzzle.suggestedDate);
+  const year = Number(puzzle.calendarYear) || 2028;
+  const monthDay = String(puzzle.suggestedMonthDay || '');
+  return /^\d{2}-\d{2}$/.test(monthDay) ? `${year}-${monthDay}` : `${year} · 日期未定`;
+}
+function calendarSortKey(puzzle) { const label = calendarDateLabel(puzzle); return /^\d{4}-\d{2}-\d{2}$/.test(label) ? label : `${Number(puzzle.calendarYear) || 2028}-99-99`; }
+function calendarReviewSummary(review = {}) {
+  const support = Number(review.support || 0);
+  const neutral = Number(review.neutral || 0);
+  const oppose = Number(review.oppose || 0);
+  const veto = Number(review.veto || 0);
+  const net = Number.isFinite(Number(review.netSupport)) ? Number(review.netSupport) : support - oppose;
+  return `支持 ${support} · 中立 ${neutral} · 反对 ${oppose} · 否决 ${veto} · 净支持 ${net}`;
+}
+function calendarEvaluationSummary(summary = {}) { const average = Number(summary.averageDifficulty); return Number.isFinite(average) && average > 0 ? `平均难度 ${average.toFixed(1)} / 6` : '暂无难度评价'; }
 function renderCalendar(pending = false) {
-  const puzzles = [...state.calendarPuzzles].filter((puzzle) => !pending || !puzzle.completed).sort((a, b) => {
-    const ad = a.suggestedDate || '9999-99-99'; const bd = b.suggestedDate || '9999-99-99';
+  const puzzles = [...state.calendarPuzzles].filter((puzzle) => puzzle.calendarStatus !== 'leftover' && (!pending || !puzzle.completed)).sort((a, b) => {
+    const ad = calendarSortKey(a); const bd = calendarSortKey(b);
     return state.calendarSort === 'newest' ? b.number - a.number : ad.localeCompare(bd) || b.number - a.number;
   });
-  const rows = puzzles.map((puzzle) => `<a class="calendar-row ${puzzle.completed ? 'is-completed' : ''}" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '日期未定'}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${puzzle.rule ? ruleLabel(puzzle.rule) : esc(puzzle.type)} · ${esc(puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small></span><span class="calendar-progress">${puzzle.completed ? '✓ 你已完成' : '待你解题'}</span><span class="calendar-rating">${ratingMarkup(puzzle.ratings, puzzle.votes)}</span><span class="calendar-arrow">→</span></a>`).join('');
+  const rows = puzzles.map((puzzle) => `<a class="calendar-row ${puzzle.completed ? 'is-completed' : ''}" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${esc(calendarDateLabel(puzzle))}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${puzzle.rule ? ruleLabel(puzzle.rule) : esc(puzzle.type)} · ${esc(puzzle.submittedBy?.username || puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small><small class="calendar-row-review">第 ${Number(puzzle.reviewRound) || 1} 轮 · ${esc(calendarStatusLabel(puzzle.calendarStatus))} · ${esc(calendarReviewSummary(puzzle.review))}</small></span><span class="calendar-progress">${puzzle.completed ? '✓ 你已完成' : '待你解题'}</span><span class="calendar-rating">${esc(calendarEvaluationSummary(puzzle.evaluationSummary))}</span><span class="calendar-arrow">→</span></a>`).join('');
   const pageTitle = pending ? '我的未完成谜题' : '谜题日历';
   const emptyState = pending
     ? `<div class="empty-state calendar-empty"><strong>没有待解题目</strong><span>这份清单只统计你自己的完成记录。</span><a class="button button-light" href="#calendar">查看全部投稿</a></div>`
     : `<div class="empty-state calendar-empty"><strong>日历还没有谜题</strong><span>可以先从规则目录中选择规则，再提交第一道日历谜题。</span>${button('提交日历谜题', 'emptyCalendarAdd', 'button button-light')}</div>`;
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>PRIVATE PUZZLE CALENDAR</p><h1>${pageTitle}<span class="heading-period">.</span></h1><p class="page-description">全部成员的投稿共同收录；完成状态只属于你自己。建议日期可留空。</p></div>${button('<span class="button-plus">+</span>提交日历谜题', 'addCalendarPuzzleButton')}</section><nav class="calendar-view-switch" aria-label="日历视图"><a class="${pending ? '' : 'active'}" href="#calendar">全部投稿 <span>${state.calendarPuzzles.length}</span></a><a class="${pending ? 'active' : ''}" href="#pending">我的未完成 <span>${state.calendarPuzzles.filter((puzzle) => !puzzle.completed).length}</span></a></nav><section class="calendar-toolbar"><div class="section-title-group"><h2>${pending ? '待你解题' : '全部日历谜题'}</h2><span class="count-badge">${String(puzzles.length).padStart(2, '0')}</span></div><label class="calendar-sort-label" for="calendarSort">排序</label><select id="calendarSort" aria-label="日历谜题排序"><option value="date" ${state.calendarSort === 'date' ? 'selected' : ''}>建议日期</option><option value="newest" ${state.calendarSort === 'newest' ? 'selected' : ''}>最近提交</option></select></section><div class="calendar-list">${puzzles.length ? rows : emptyState}</div></div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>PRIVATE PUZZLE CALENDAR</p><h1>${pageTitle}<span class="heading-period">.</span></h1><p class="page-description">全部成员的投稿共同收录；每道谜题按轮次积累评价。建议月份和日期可留空。</p></div>${button('<span class="button-plus">+</span>提交日历谜题', 'addCalendarPuzzleButton')}</section><nav class="calendar-view-switch" aria-label="日历视图"><a class="${pending ? '' : 'active'}" href="#calendar">全部投稿 <span>${state.calendarPuzzles.length}</span></a><a class="${pending ? 'active' : ''}" href="#pending">我的未完成 <span>${state.calendarPuzzles.filter((puzzle) => puzzle.calendarStatus !== 'leftover' && !puzzle.completed).length}</span></a><a href="#leftovers">待重新进入 <span>${state.calendarLeftovers.length}</span></a></nav><section class="calendar-toolbar"><div class="section-title-group"><h2>${pending ? '待你解题' : '全部日历谜题'}</h2><span class="count-badge">${String(puzzles.length).padStart(2, '0')}</span></div><label class="calendar-sort-label" for="calendarSort">排序</label><select id="calendarSort" aria-label="日历谜题排序"><option value="date" ${state.calendarSort === 'date' ? 'selected' : ''}>建议日期</option><option value="newest" ${state.calendarSort === 'newest' ? 'selected' : ''}>最近提交</option></select></section><div class="calendar-list">${puzzles.length ? rows : emptyState}</div></div>`;
+}
+function renderCalendarLeftovers() {
+  const puzzles = [...state.calendarLeftovers].filter((puzzle) => puzzle.calendarStatus === 'leftover').sort((a, b) => b.number - a.number);
+  const rows = puzzles.map((puzzle) => `<a class="calendar-row leftover-row" href="#calendar-puzzle-${puzzle.number}"><span class="calendar-date">${esc(calendarDateLabel(puzzle))}</span><span class="calendar-info"><strong>${esc(puzzle.title)}</strong><small>${puzzle.rule ? ruleLabel(puzzle.rule) : esc(puzzle.type)} · ${esc(puzzle.submittedBy?.username || puzzle.submittedBy?.name || puzzle.author || '未知作者')}</small><small class="calendar-row-review">第 ${Number(puzzle.reviewRound) || 1} 轮 · ${esc(calendarReviewSummary(puzzle.review))}</small></span><span class="calendar-progress">待重新进入</span><span class="calendar-rating">${esc(calendarEvaluationSummary(puzzle.evaluationSummary))}</span><span class="calendar-arrow">→</span></a>`).join('');
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>CALENDAR REENTRY</p><h1>待重新进入<span class="heading-period">.</span></h1><p class="page-description">一票否决或未达到通过门槛的投稿会暂存在这里。重新进入会开启新一轮投票，并保留历史记录。</p></div></section><nav class="calendar-view-switch" aria-label="日历视图"><a href="#calendar">全部投稿 <span>${state.calendarPuzzles.length}</span></a><a href="#pending">我的未完成 <span>${state.calendarPuzzles.filter((puzzle) => !puzzle.completed).length}</span></a><a class="active" href="#leftovers">待重新进入 <span>${puzzles.length}</span></a></nav><section class="calendar-toolbar"><div class="section-title-group"><h2>待重新进入</h2><span class="count-badge">${String(puzzles.length).padStart(2, '0')}</span></div></section><div class="calendar-list">${puzzles.length ? rows : '<div class="empty-state calendar-empty"><strong>没有待重新进入的投稿</strong><span>已被归档的投稿会显示在这里。</span></div>'}</div></div>`;
+}
+function renderCalendarDateInputs(prefix, year = 2028, monthDay = '') {
+  const [monthValue = '', dayValue = ''] = String(monthDay || '').split('-');
+  const safeYear = Number.isInteger(Number(year)) && Number(year) >= 1900 && Number(year) <= 9999 ? Number(year) : 2028;
+  return `<div class="calendar-date-fields"><label><span>年份</span><input id="${prefix}Year" type="number" min="1900" max="9999" step="1" value="${safeYear}" /></label><label><span>月份（可选）</span><select id="${prefix}Month"><option value="">不指定</option>${Array.from({ length: 12 }, (_, index) => index + 1).map((month) => `<option value="${String(month).padStart(2, '0')}" ${String(month).padStart(2, '0') === monthValue ? 'selected' : ''}>${month} 月</option>`).join('')}</select></label><label><span>日期（可选）</span><select id="${prefix}Day" data-initial="${esc(dayValue)}"><option value="">不指定</option></select></label></div><p class="form-help">只选年份也可以；月份和日期留空表示暂不安排，不会自动补成 1 月 1 日。</p>`;
+}
+function bindCalendarDateInputs(prefix) {
+  const month = document.querySelector(`#${prefix}Month`);
+  const day = document.querySelector(`#${prefix}Day`);
+  const year = document.querySelector(`#${prefix}Year`);
+  if (!month || !day || !year) return;
+  const updateDays = (preferredDay = day.value) => {
+    const monthNumber = Number(month.value);
+    const yearNumber = Number(year.value) || 2028;
+    const count = monthNumber ? new Date(yearNumber, monthNumber, 0).getDate() : 31;
+    day.innerHTML = `<option value="">不指定</option>${Array.from({ length: count }, (_, index) => index + 1).map((number) => `<option value="${String(number).padStart(2, '0')}" ${String(number).padStart(2, '0') === preferredDay ? 'selected' : ''}>${number} 日</option>`).join('')}`;
+  };
+  updateDays(day.dataset.initial || day.value);
+  month.addEventListener('change', () => updateDays(''));
+  year.addEventListener('change', () => updateDays(day.value));
+}
+function readCalendarDateFields(prefix) {
+  const year = Number(document.querySelector(`#${prefix}Year`)?.value);
+  const month = document.querySelector(`#${prefix}Month`)?.value || '';
+  const day = document.querySelector(`#${prefix}Day`)?.value || '';
+  if (!Number.isInteger(year) || year < 1900 || year > 9999) return { error: '年份需填写 1900 至 9999 之间的整数。' };
+  if (Boolean(month) !== Boolean(day)) return { error: '建议日期需要同时选择月份和日期，或两项都留空。' };
+  return { calendarYear: year, suggestedMonthDay: month && day ? `${month}-${day}` : '' };
+}
+function notificationEntityMarkup(notification) {
+  const entity = notification.entity || {};
+  const id = Number(entity.id);
+  if (!Number.isSafeInteger(id) || id < 1) return '';
+  const type = String(entity.type || '').toLowerCase();
+  if (['calendar-puzzle', 'calendar_puzzle', 'puzzle'].includes(type)) {
+    const exists = [...state.calendarPuzzles, ...state.calendarLeftovers].some((puzzle) => Number(puzzle.number) === id);
+    return exists ? `<a class="inbox-entity-link" href="#calendar-puzzle-${id}">查看谜题 →</a>` : '<span class="inbox-entity-missing">关联谜题已删除或暂不可用</span>';
+  }
+  if (['rule', 'rules'].includes(type)) {
+    const exists = state.rules.some((rule) => Number(rule.id) === id);
+    return exists ? '<a class="inbox-entity-link" href="#rules">查看规则目录 →</a>' : '<span class="inbox-entity-missing">关联规则已删除或暂不可用</span>';
+  }
+  return '';
+}
+function renderMessages() {
+  const notifications = state.inboxItems || [];
+  const items = notifications.map((item) => {
+    const id = String(item.id);
+    const isRead = Boolean(item.readAt);
+    const pending = state.inboxPendingIds.has(id);
+    return `<article class="inbox-item ${isRead ? 'is-read' : 'is-unread'}"><div class="inbox-item-copy"><div class="inbox-item-heading"><h2>${esc(item.title || '通知')}</h2><time>${esc(item.createdAt || '')}</time></div><p>${esc(item.body || '')}</p>${notificationEntityMarkup(item)}</div><div class="inbox-item-actions">${!isRead ? `<button class="button button-light" type="button" data-inbox-read="${esc(id)}" ${pending ? 'disabled' : ''}>${pending ? '正在标记…' : '标记已读'}</button>` : '<span class="inbox-read-label">已读</span>'}</div></article>`;
+  }).join('');
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>MEMBER INBOX</p><h1>收件箱<span class="heading-period">.</span></h1><p class="page-description">仅显示发送给你的系统通知；成员之间的私聊不在这里。</p></div><div class="inbox-heading-actions"><button class="button button-light" id="refreshInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在刷新…' : '刷新通知'}</button>${notifications.some((item) => !item.readAt) ? `<button class="button button-light" id="markAllInboxReadButton" type="button" ${state.inboxReadAllPending ? 'disabled' : ''}>${state.inboxReadAllPending ? '正在标记…' : '全部标记已读'}</button>` : ''}</div></section>${state.inboxActionError ? `<p class="inbox-error" role="alert">${esc(state.inboxActionError)}</p>` : ''}${state.inboxError ? `<p class="inbox-error" role="alert">${esc(state.inboxError)}</p>` : ''}<section class="inbox-list" aria-label="系统通知">${items || (state.inboxLoading ? '<div class="empty-state" role="status">正在加载通知…</div>' : '<div class="empty-state">目前没有通知。</div>')}</section>${state.inboxNextBefore ? `<div class="inbox-more"><button class="button button-light" id="loadMoreInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在加载…' : '加载更多'}</button></div>` : ''}</div>`;
+}
+async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { append = false } = {}) {
+  const params = new URLSearchParams({ limit: '20' });
+  if (append && state.inboxNextBefore) params.set('before', String(state.inboxNextBefore));
+  const data = await apiRequest(`/api/inbox?${params.toString()}`);
+  if (!isCurrentUserSession(epoch, userId)) return false;
+  const received = data.notifications || [];
+  if (append) {
+    const existing = new Set(state.inboxItems.map((item) => String(item.id)));
+    state.inboxItems = [...state.inboxItems, ...received.filter((item) => !existing.has(String(item.id)))];
+  } else state.inboxItems = received;
+  state.inboxUnreadCount = Number(data.unreadCount || 0);
+  state.inboxNextBefore = data.nextBefore || null;
+  return true;
+}
+async function loadInboxFresh() {
+  if (!state.user || state.inboxLoading) return;
+  const epoch = state.sessionEpoch; const userId = state.user.id;
+  state.inboxLoading = true; state.inboxError = ''; state.inboxActionError = ''; renderRoute();
+  const [inboxResult, calendarResult, leftoverResult, rulesResult] = await Promise.allSettled([
+    apiRequest('/api/inbox?limit=20'),
+    apiRequest('/api/calendar/puzzles'),
+    apiRequest('/api/calendar/leftovers'),
+    apiRequest('/api/rules')
+  ]);
+  if (!isCurrentUserSession(epoch, userId)) return;
+  if (inboxResult.status === 'fulfilled') {
+    const inboxData = inboxResult.value;
+    state.inboxItems = inboxData.notifications || [];
+    state.inboxUnreadCount = Number(inboxData.unreadCount || 0);
+    state.inboxNextBefore = inboxData.nextBefore || null;
+  } else state.inboxError = inboxResult.reason?.message || '无法刷新通知。';
+  if (calendarResult.status === 'fulfilled') state.calendarPuzzles = (calendarResult.value.puzzles || []).map(normalizePuzzle);
+  if (leftoverResult.status === 'fulfilled') state.calendarLeftovers = (leftoverResult.value.puzzles || []).map(normalizePuzzle);
+  if (rulesResult.status === 'fulfilled') state.rules = rulesResult.value.rules || [];
+  state.inboxLoading = false;
+  renderRoute();
+}
+async function markInboxRead(id) {
+  const key = String(id); if (state.inboxPendingIds.has(key)) return;
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  state.inboxPendingIds = new Set([...state.inboxPendingIds, key]); state.inboxActionError = ''; renderRoute();
+  try {
+    await apiRequest(`/api/inbox/${encodeURIComponent(key)}/read`, { method: 'POST', body: '{}' });
+    if (!isCurrentUserSession(epoch, userId)) return;
+    await refreshInbox(epoch, userId); if (!isCurrentUserSession(epoch, userId)) return;
+    state.inboxPendingIds.delete(key); renderRoute();
+  } catch (error) {
+    if (!isCurrentUserSession(epoch, userId)) return;
+    state.inboxPendingIds.delete(key); state.inboxActionError = error.message || '标记已读失败。'; renderRoute();
+  }
+}
+async function markAllInboxRead() {
+  if (state.inboxReadAllPending) return;
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  state.inboxReadAllPending = true; state.inboxActionError = ''; renderRoute();
+  try {
+    await apiRequest('/api/inbox/read-all', { method: 'POST', body: '{}' });
+    if (!isCurrentUserSession(epoch, userId)) return;
+    await refreshInbox(epoch, userId); if (!isCurrentUserSession(epoch, userId)) return;
+    state.inboxReadAllPending = false; renderRoute();
+  } catch (error) {
+    if (!isCurrentUserSession(epoch, userId)) return;
+    state.inboxReadAllPending = false; state.inboxActionError = error.message || '全部标记已读失败。'; renderRoute();
+  }
+}
+async function loadMoreInbox() {
+  if (state.inboxLoading || !state.inboxNextBefore) return;
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  state.inboxLoading = true; state.inboxError = ''; renderRoute();
+  try { await refreshInbox(epoch, userId, { append: true }); if (!isCurrentUserSession(epoch, userId)) return; state.inboxLoading = false; renderRoute(); }
+  catch (error) { if (!isCurrentUserSession(epoch, userId)) return; state.inboxLoading = false; state.inboxError = error.message || '无法加载更多通知。'; renderRoute(); }
+}
+function bindMessages() {
+  document.querySelector('#refreshInboxButton')?.addEventListener('click', loadInboxFresh);
+  document.querySelectorAll('[data-inbox-read]').forEach((button) => button.addEventListener('click', () => markInboxRead(button.dataset.inboxRead)));
+  document.querySelector('#markAllInboxReadButton')?.addEventListener('click', markAllInboxRead);
+  document.querySelector('#loadMoreInboxButton')?.addEventListener('click', loadMoreInbox);
 }
 function renderRules() {
   const rules = state.rules;
@@ -128,11 +292,12 @@ function renderRuleCard(rule, allRules) {
   const quality = rule.quality || { errors: [], warnings: [], groups: {} };
   const errors = quality.errors || []; const warnings = quality.warnings || []; const groups = quality.groups || {};
   const baseRule = allRules.find((item) => String(item.id) === String(rule.baseRuleId));
+  const creator = rule.creator ? (rule.creator.username || rule.creator.name || '成员') : '系统导入';
   const auditCards = ['name', 'description', 'example'].map((item) => renderAuditGroup(rule, item, groups[item] || {}, errors, warnings)).join('');
   const exampleAuthor = String(rule.exampleAuthor || '').trim();
   const exampleAuthorMarkup = exampleAuthor ? `<p class="rule-example-author">例题作者：${esc(exampleAuthor)}</p>` : '';
   const exampleLink = isConcretePenpaPuzzleUrl(rule.exampleUrl) ? `<a class="rule-example-link" href="${esc(rule.exampleUrl)}" target="_blank" rel="noopener noreferrer">打开 Penpa 例题 ↗</a>` : '<p class="rule-missing">尚未提供有效的 Penpa 例题</p>';
-  return `<article class="rule-card" data-rule-card="${esc(rule.id)}"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category || '未分类')}</span><h2>${ruleTitlePair(rule)}</h2></div><div class="rule-card-actions">${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}<button type="button" class="button button-light rule-edit-button" data-rule-edit="${esc(rule.id)}">编辑</button><button type="button" class="button button-light rule-delete-button" data-rule-delete="${esc(rule.id)}" data-delete-token="${esc(rule.deleteToken || '')}" data-edit-version="${esc(rule.editVersion || '')}" data-rule-title="${esc(ruleTitle(rule))}" aria-label="删除规则：${esc(ruleTitle(rule))}" ${rule.deleteToken ? '' : 'disabled title="无法确认规则身份，请刷新目录"'}>删除</button></div></div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rule.baseRuleTitleEn || (baseRule ? ruleTitle(baseRule) : '未指定'))}</p>` : ''}<div class="rule-quality-inline">${errors.length ? `<span class="quality-error-pill">${errors.length} 项错误</span>` : '<span class="quality-ok-pill">无错误项</span>'}${warnings.length ? `<span class="quality-warning-pill">${warnings.length} 项待审核</span>` : ''}</div>${errors.length || warnings.length ? `<ul class="rule-quality-messages">${[...errors.map((entry) => ({ ...entry, severity: 'error' })), ...warnings.map((entry) => ({ ...entry, severity: 'warning' }))].map((entry) => `<li class="${entry.severity}">${esc(entry.message)}</li>`).join('')}</ul>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${rule.rulesZh?.length ? clauseMarkup(rule.rulesZh) : '<p class="rule-missing">尚未填写中文规则描述</p>'}</section><section><h3>Rules · English</h3>${rule.rulesEn?.length ? clauseMarkup(rule.rulesEn) : '<p class="rule-optional">English description is optional.</p>'}</section></div><div class="rule-example">${exampleAuthorMarkup}${exampleLink}</div><section class="rule-audit-grid" aria-label="独立审核">${auditCards}</section></article>`;
+  return `<article class="rule-card" data-rule-card="${esc(rule.id)}"><div class="rule-card-heading"><div><span class="rule-category">${esc(rule.category || '未分类')}</span><h2>${ruleTitlePair(rule)}</h2><p class="rule-creator">创建者：${esc(creator)}</p></div><div class="rule-card-actions">${rule.isVariant ? '<span class="rule-variant">变体</span>' : ''}<button type="button" class="button button-light rule-edit-button" data-rule-edit="${esc(rule.id)}">编辑</button><button type="button" class="button button-light rule-delete-button" data-rule-delete="${esc(rule.id)}" data-delete-token="${esc(rule.deleteToken || '')}" data-edit-version="${esc(rule.editVersion || '')}" data-rule-title="${esc(ruleTitle(rule))}" aria-label="删除规则：${esc(ruleTitle(rule))}" ${rule.deleteToken ? '' : 'disabled title="无法确认规则身份，请刷新目录"'}>删除</button></div></div>${rule.isVariant ? `<p class="rule-base">原始规则：${esc(rule.baseRuleTitleZh || rule.baseRuleTitleEn || (baseRule ? ruleTitle(baseRule) : '未指定'))}</p>` : ''}<div class="rule-quality-inline">${errors.length ? `<span class="quality-error-pill">${errors.length} 项错误</span>` : '<span class="quality-ok-pill">无错误项</span>'}${warnings.length ? `<span class="quality-warning-pill">${warnings.length} 项待审核</span>` : ''}</div>${errors.length || warnings.length ? `<ul class="rule-quality-messages">${[...errors.map((entry) => ({ ...entry, severity: 'error' })), ...warnings.map((entry) => ({ ...entry, severity: 'warning' }))].map((entry) => `<li class="${entry.severity}">${esc(entry.message)}</li>`).join('')}</ul>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${rule.rulesZh?.length ? clauseMarkup(rule.rulesZh) : '<p class="rule-missing">尚未填写中文规则描述</p>'}</section><section><h3>Rules · English</h3>${rule.rulesEn?.length ? clauseMarkup(rule.rulesEn) : '<p class="rule-optional">English description is optional.</p>'}</section></div><div class="rule-example">${exampleAuthorMarkup}${exampleLink}</div><section class="rule-audit-grid" aria-label="独立审核">${auditCards}</section></article>`;
 }
 function renderAuditGroup(rule, item, group, errors, warnings) {
   const itemErrors = errors.filter((entry) => entry.item === item);
@@ -158,18 +323,22 @@ function renderAuthors() { const authors = [...new Set(state.puzzles.map((puzzle
 function openPuzzle(number) { window.location.hash = `#puzzle-${number}`; }
 function renderPuzzlePage(number, scope = 'library') {
   const isCalendar = scope === 'calendar';
-  const puzzles = isCalendar ? state.calendarPuzzles : state.puzzles;
+  const puzzles = isCalendar ? [...state.calendarPuzzles, ...state.calendarLeftovers] : state.puzzles;
   const puzzle = puzzles.find((item) => Number(item.number) === Number(number));
   if (!puzzle) return `<div class="page-wrap-inner"><div class="empty-state">找不到这道${isCalendar ? '日历' : ''}谜题。</div><a class="back-link" href="#${isCalendar ? 'calendar' : 'library'}">返回${isCalendar ? '谜题日历' : '题库'}</a></div>`;
   const hasRating = puzzle.userRating;
   const rule = puzzle.rule;
   const ruleSection = rule ? `<details open><summary>${ruleTitlePair(rule)}</summary>${rule.isVariant ? `<p class="rule-base">变体自：${esc(rule.baseRuleTitleZh || rule.baseRuleTitleEn || ruleTitle(state.rules.find((item) => String(item.id) === String(rule.baseRuleId)) || {}))}</p>` : ''}<div class="rule-language-grid"><section><h3>规则 · 中文</h3>${clauseMarkup(rule.rulesZh)}</section><section><h3>Rules · English</h3>${clauseMarkup(rule.rulesEn)}</section></div></details>` : `<details><summary>查看题目规则</summary><p>${esc(puzzle.rules || '暂未提供规则。')}</p></details>`;
   const isCalendarOwner = isCalendar && String(puzzle.submittedBy?.id) === String(state.user?.id);
-  const dateControl = isCalendarOwner ? `<div class="detail-block"><h3>建议日期</h3><label class="inline-date-label" for="suggestedDateEdit">${puzzle.suggestedDate ? esc(puzzle.suggestedDate) : '尚未安排'}</label><input id="suggestedDateEdit" type="date" value="${esc(puzzle.suggestedDate || '')}" /><button class="button button-light date-save-button" id="saveSuggestedDateButton" type="button">保存日期</button></div>` : '';
-  const deletePuzzleControl = isCalendarOwner ? `<button class="button button-danger puzzle-delete-button" id="deleteCalendarPuzzleButton" type="button" data-puzzle-number="${esc(puzzle.number)}" data-delete-token="${esc(puzzle.deleteToken || '')}" data-puzzle-title="${esc(puzzle.title)}" data-return-route="${esc(state.calendarReturnRoute === 'pending' ? 'pending' : 'calendar')}" aria-label="删除日历谜题：${esc(puzzle.title)}" ${puzzle.deleteToken ? '' : 'disabled title="无法确认投稿身份，请刷新页面"'}>删除此投稿</button>` : '';
+  const isLeftover = isCalendar && puzzle.calendarStatus === 'leftover';
+  const dateControl = isCalendarOwner ? `<div class="detail-block"><h3>建议日期</h3><div class="form-field">${renderCalendarDateInputs('suggestedDateEdit', puzzle.calendarYear || 2028, puzzle.suggestedMonthDay || (puzzle.suggestedDate ? puzzle.suggestedDate.slice(5) : ''))}</div><button class="button button-light date-save-button" id="saveSuggestedDateButton" type="button">保存日期</button></div>` : '';
+  const deletePuzzleControl = isCalendarOwner ? `<button class="button button-danger puzzle-delete-button" id="deleteCalendarPuzzleButton" type="button" data-puzzle-number="${esc(puzzle.number)}" data-delete-token="${esc(puzzle.deleteToken || '')}" data-puzzle-title="${esc(puzzle.title)}" data-return-route="${esc(state.calendarReturnRoute)}" aria-label="删除日历谜题：${esc(puzzle.title)}" ${puzzle.deleteToken ? '' : 'disabled title="无法确认投稿身份，请刷新页面"'}>删除此投稿</button>` : '';
+  const reviewHistory = (puzzle.reviewHistory || []).map((round) => `<li><strong>第 ${Number(round.reviewRound) || 1} 轮 · ${esc(calendarStatusLabel(round.status))}</strong><span>${esc(calendarReviewSummary(round))} · ${Number(round.evaluationCount || 0)} 份评价 · ${esc(calendarEvaluationSummary({ averageDifficulty: round.averageDifficulty }))}</span></li>`).join('');
+  const calendarReview = isCalendar ? `<section class="calendar-review-panel"><div><span>当前轮次</span><strong>第 ${Number(puzzle.reviewRound) || 1} 轮 · ${esc(calendarStatusLabel(puzzle.calendarStatus))}</strong></div><div><span>当前轮投票</span><strong>${esc(calendarReviewSummary(puzzle.review))}</strong></div><div><span>全体难度评价</span><strong>${esc(calendarEvaluationSummary(puzzle.evaluationSummary))}</strong></div><div><span>你的投票</span><strong>${esc(calendarVoteLabel(puzzle.userVote) || '尚未投票')}</strong></div>${puzzle.evaluation ? `<p>你的难度：${Number(puzzle.evaluation.difficulty) || '—'} / 6 · 评价标签：${esc((puzzle.evaluation.tags || []).join('、') || '未选')}</p>` : ''}${reviewHistory ? `<details class="calendar-review-history"><summary>轮次历史（${puzzle.reviewHistory.length}）</summary><ol>${reviewHistory}</ol></details>` : ''}</section>` : '';
+  const reviewAction = isCalendar ? (isLeftover ? `<div class="detail-block record-panel"><h3>本轮已归档</h3><p class="record-help">该投稿在第 ${Number(puzzle.reviewRound) || 1} 轮被暂存。重新进入会开启新一轮投票，并保留历史评价与投票记录。</p>${button('重新进入新一轮', 'reenterCalendarPuzzleButton', 'button button-dark')}</div>` : `<div class="detail-block record-panel"><h3>完成与评价</h3><p class="record-help">完成题目后提交难度、标签和本轮投票。投票可在通过后继续修改。</p>${button(puzzle.completed ? '✓ 已完成 · 修改评价或投票' : '标记完成并评价', 'completePuzzleButton', puzzle.completed ? 'button button-dark' : 'button button-light')}</div>`) : `<div class="detail-block record-panel"><h3>ANSWER RECORD</h3><p class="record-help">完成题目后，分别评价逻辑难度、通灵难度和喜爱程度。</p><button class="button ${puzzle.completed ? 'button-dark' : 'button-light'}" id="completePuzzleButton" type="button">${puzzle.completed ? '✓ 已完成 · 修改评分' : '标记为已完成'}</button>${hasRating ? `<div class="submitted-rating"><span>我的评分</span>${ratingMarkup(puzzle.userRating, 1)}</div>` : ''}</div>`;
   const authorName = puzzle.author || puzzle.submittedBy?.name || '未知作者';
   const authorLabel = isCalendar ? esc(authorName) : `<a href="#authors">${esc(authorName)}</a>`;
-  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? state.calendarReturnRoute : 'library'}">← 返回${isCalendar ? (state.calendarReturnRoute === 'pending' ? '我的未完成谜题' : '谜题日历') : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 ${authorLabel} 发布　·　${puzzle.votes} 位解题者评分${isCalendar ? `　·　建议日期 ${esc(puzzle.suggestedDate || '未定')}` : ''}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : deletePuzzleControl}</div></section><section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div><div class="puzzle-open-actions">${puzzle.inputMode === 'blank' ? '<span class="muted">这是一个内置填空题</span>' : '<span class="muted">外部题目通过上方工具按钮在新标签页打开</span>'}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${dateControl}<div class="detail-block record-panel"><h3>ANSWER RECORD</h3><p class="record-help">完成题目后，分别评价逻辑难度、通灵难度和喜爱程度。</p><button class="button ${puzzle.completed ? 'button-dark' : 'button-light'}" id="completePuzzleButton" type="button">${puzzle.completed ? '✓ 已完成 · 修改评分' : '标记为已完成'}</button>${hasRating ? `<div class="submitted-rating"><span>我的评分</span>${ratingMarkup(puzzle.userRating, 1)}</div>` : ''}</div>${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section></div>`;
+  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? state.calendarReturnRoute : 'library'}">← 返回${isCalendar ? (state.calendarReturnRoute === 'pending' ? '我的未完成谜题' : state.calendarReturnRoute === 'leftovers' ? '待重新进入' : '谜题日历') : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 ${authorLabel} 发布${isCalendar ? `　·　${esc(calendarDateLabel(puzzle))}` : `　·　${puzzle.votes} 位解题者评分`}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : deletePuzzleControl}</div></section>${calendarReview}<section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div><div class="puzzle-open-actions">${puzzle.inputMode === 'blank' ? '<span class="muted">这是一个内置填空题</span>' : '<span class="muted">外部题目通过上方工具按钮在新标签页打开</span>'}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${dateControl}${reviewAction}${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section></div>`;
 }
 
 function renderPuzzleOpenTools(puzzle) {
@@ -192,13 +361,69 @@ function renderEmbed(puzzle) {
 
 function isSupportedPuzzleUrl(value) { return parseTrustedPuzzleUrl(value) !== null; }
 
-function openRating(number, scope = 'library') { const isCalendar = scope === 'calendar'; const puzzles = isCalendar ? state.calendarPuzzles : state.puzzles; const puzzle = puzzles.find((item) => Number(item.number) === Number(number)); if (!puzzle) return; const current = puzzle.userRating || [3, 3, 3]; openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`); ['logic', 'intuition', 'love'].forEach((key) => { const input = document.querySelector(`#${key}Rating`); const output = document.querySelector(`#${key}Value`); input.addEventListener('input', () => { output.textContent = input.value; }); }); document.querySelector('#submitRatingButton').addEventListener('click', async () => { const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value)); const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const path = isCalendar ? `/api/calendar/puzzles/${number}/complete-rating` : `/api/puzzles/${number}/complete-rating`; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) }); if (isCalendar) state.calendarPuzzles = data.puzzles.map(normalizePuzzle); else applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('完成记录已保存，平均评分已更新'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
+function openRating(number, scope = 'library') { const isCalendar = scope === 'calendar'; const puzzles = isCalendar ? [...state.calendarPuzzles, ...state.calendarLeftovers] : state.puzzles; const puzzle = puzzles.find((item) => Number(item.number) === Number(number)); if (!puzzle) return; if (isCalendar) return openCalendarEvaluation(puzzle); const current = puzzle.userRating || [3, 3, 3]; openModal(`<p class="modal-eyebrow">ANSWER RECORD · #${puzzle.number}</p><h2 id="modalTitle">完成并评分</h2><p class="modal-intro">请在完成 ${esc(puzzle.title)} 后，为三个维度各给出 1–5 分。</p><div class="rating-form"><label><span>✎ 逻辑难度 <b id="logicValue">${current[0]}</b></span><input type="range" id="logicRating" min="1" max="5" step="1" value="${current[0]}" /></label><label><span>♧ 通灵难度 <b id="intuitionValue">${current[1]}</b></span><input type="range" id="intuitionRating" min="1" max="5" step="1" value="${current[1]}" /></label><label><span>♥ 喜爱程度 <b id="loveValue">${current[2]}</b></span><input type="range" id="loveRating" min="1" max="5" step="1" value="${current[2]}" /></label></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成记录', 'submitRatingButton')}</div>`); ['logic', 'intuition', 'love'].forEach((key) => { const input = document.querySelector(`#${key}Rating`); const output = document.querySelector(`#${key}Value`); input.addEventListener('input', () => { output.textContent = input.value; }); }); document.querySelector('#submitRatingButton').addEventListener('click', async () => { const ratings = ['logic', 'intuition', 'love'].map((key) => Number(document.querySelector(`#${key}Rating`).value)); const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const data = await apiRequest(`/api/puzzles/${number}/complete-rating`, { method: 'POST', body: JSON.stringify({ logic: ratings[0], intuition: ratings[1], enjoyment: ratings[2] }) }); if (!isCurrentUserSession(requestEpoch, userId)) return; applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('完成记录已保存，平均评分已更新'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
+async function refreshCalendarData(epoch = state.sessionEpoch, userId = state.user?.id) { const [activeData, leftoverData] = await Promise.all([apiRequest('/api/calendar/puzzles'), apiRequest('/api/calendar/leftovers')]); if (!isCurrentUserSession(epoch, userId)) return false; state.calendarPuzzles = (activeData.puzzles || []).map(normalizePuzzle); state.calendarLeftovers = (leftoverData.puzzles || []).map(normalizePuzzle); return true; }
+function calendarVoteLabel(vote) { return ({ support: '支持', neutral: '中立', oppose: '反对', veto: '一票否决' })[vote] || ''; }
+function openCalendarEvaluation(puzzle) {
+  if (puzzle.calendarStatus === 'leftover') return;
+  const difficulty = Number(puzzle.evaluation?.difficulty) || 0;
+  const tags = Array.isArray(puzzle.evaluation?.tags) ? puzzle.evaluation.tags : [];
+  const vote = puzzle.userVote || '';
+  openModal(`<p class="modal-eyebrow">CALENDAR REVIEW · ROUND ${Number(puzzle.reviewRound) || 1}</p><h2 id="modalTitle">完成与评价</h2><p class="modal-intro">完成「${esc(puzzle.title)}」后提交你的难度、标签和本轮投票。标签可选 0–6 项；投票在通过后仍可修改。</p><fieldset class="calendar-evaluation-fieldset"><legend>难度（必选）</legend><div class="difficulty-options">${[1,2,3,4,5,6].map((value) => `<label><input type="radio" name="calendarDifficulty" value="${value}" ${value === difficulty ? 'checked' : ''} /><span>${value}</span></label>`).join('')}</div></fieldset><fieldset class="calendar-evaluation-fieldset"><legend>评价标签（可选）</legend><div class="calendar-tag-options">${CALENDAR_REVIEW_TAGS.map((tag) => `<label><input type="checkbox" name="calendarTag" value="${esc(tag)}" ${tags.includes(tag) ? 'checked' : ''} /><span>${esc(tag)}</span></label>`).join('')}</div></fieldset><fieldset class="calendar-evaluation-fieldset"><legend>本轮投票（必选）</legend><div class="calendar-vote-options">${CALENDAR_REVIEW_VOTES.map((value) => `<label><input type="radio" name="calendarVote" value="${value}" ${value === vote ? 'checked' : ''} /><span>${calendarVoteLabel(value)}</span></label>`).join('')}</div><p class="form-help">净支持达到 3 票后通过；一票否决会立即转入“待重新进入”。</p></fieldset><div class="modal-error" id="calendarEvaluationError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('提交完成与投票', 'submitCalendarEvaluationButton')}</div>`);
+  const errorNode = document.querySelector('#calendarEvaluationError');
+  const submit = document.querySelector('#submitCalendarEvaluationButton');
+  submit.addEventListener('click', async () => {
+    if (submit.disabled) return;
+    const selectedDifficulty = Number(document.querySelector('input[name="calendarDifficulty"]:checked')?.value);
+    const selectedVote = document.querySelector('input[name="calendarVote"]:checked')?.value;
+    if (!selectedDifficulty || !selectedVote) { errorNode.textContent = '请选择难度和本轮投票。'; return; }
+    const selectedTags = [...document.querySelectorAll('input[name="calendarTag"]:checked')].map((input) => input.value);
+    const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const modalStillOpen = () => errorNode.isConnected;
+    submit.disabled = true; submit.textContent = '正在提交…';
+    try {
+      const data = await apiRequest(`/api/calendar/puzzles/${encodeURIComponent(puzzle.number)}/complete-rating`, { method: 'POST', body: JSON.stringify({ difficulty: selectedDifficulty, tags: selectedTags, vote: selectedVote, expectedReviewRound: Number(puzzle.reviewRound) || 1 }) });
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      if (Array.isArray(data.puzzles)) state.calendarPuzzles = data.puzzles.map(normalizePuzzle);
+      await refreshCalendarData(requestEpoch, userId);
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      const mayClose = modalStillOpen(); if (mayClose) closeModal(); renderRoute(); if (mayClose) showToast('完成记录与本轮投票已保存');
+    } catch (error) {
+      if (!isCurrentUserSession(requestEpoch, userId) || !modalStillOpen()) return;
+      if (error.status === 409) { try { await refreshCalendarData(requestEpoch, userId); } catch {} if (!isCurrentUserSession(requestEpoch, userId) || !modalStillOpen()) return; renderRoute(); errorNode.textContent = '本轮状态已变化，数据已刷新。请取消并重新打开表单后再操作；未自动重试本次提交。'; submit.disabled = true; submit.textContent = '轮次已更新'; }
+      else { errorNode.textContent = error.message || '提交失败，请稍后重试。'; submit.disabled = false; submit.textContent = '提交完成与投票'; }
+    }
+  });
+}
+function openCalendarReentry(puzzle) {
+  const target = { number: puzzle.number, title: puzzle.title, reviewRound: Number(puzzle.reviewRound) || 1 };
+  openModal(`<p class="modal-eyebrow">CALENDAR REENTRY · ROUND ${target.reviewRound}</p><h2 id="modalTitle">重新进入新一轮</h2><p class="modal-intro">确认将「${esc(target.title)}」重新放入活动日历？这会开启第 ${target.reviewRound + 1} 轮并重置当前轮投票；此前轮次、完成记录和评价会保留。</p><div class="modal-error" id="calendarReentryError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('确认重新进入', 'confirmCalendarReentryButton', 'button button-dark')}</div>`);
+  const errorNode = document.querySelector('#calendarReentryError'); const confirm = document.querySelector('#confirmCalendarReentryButton');
+  confirm.addEventListener('click', async () => {
+    if (confirm.disabled) return;
+    const requestEpoch = state.sessionEpoch; const userId = state.user?.id; confirm.disabled = true; confirm.textContent = '正在重新进入…';
+    try {
+      await apiRequest(`/api/calendar/puzzles/${encodeURIComponent(target.number)}/reenter`, { method: 'POST', body: JSON.stringify({ expectedReviewRound: target.reviewRound }) });
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      await refreshCalendarData(requestEpoch, userId); if (!isCurrentUserSession(requestEpoch, userId)) return;
+      const mayClose = errorNode.isConnected; if (mayClose) closeModal(); state.calendarReturnRoute = 'calendar'; window.location.hash = `#calendar-puzzle-${target.number}`; if (mayClose) showToast(`「${target.title}」已进入新一轮`);
+    } catch (error) {
+      if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return;
+      if (error.status === 409) { try { await refreshCalendarData(requestEpoch, userId); } catch {} if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return; errorNode.textContent = '轮次已被其他成员更新，列表已刷新。请取消后重新打开确认框。'; confirm.disabled = true; confirm.textContent = '轮次已更新'; }
+      else { errorNode.textContent = error.message || '无法重新进入，请稍后重试。'; confirm.disabled = false; confirm.textContent = '确认重新进入'; }
+    }
+  });
+}
 function bindLibrary() { document.querySelector('#addPuzzleButton')?.addEventListener('click', openAddPuzzle); document.querySelector('#filterButton')?.addEventListener('click', () => { const row = document.querySelector('#filterRow'); row.hidden = !row.hidden; }); document.querySelectorAll('.filter-pill').forEach((button) => button.addEventListener('click', () => { state.filter = button.dataset.filter; state.visible = 6; renderRoute(); })); document.querySelectorAll('.segment').forEach((button) => button.addEventListener('click', () => { state.sort = button.dataset.sort; renderRoute(); })); document.querySelector('#loadMoreButton')?.addEventListener('click', () => { state.visible = Math.min(state.visible + 2, filteredPuzzles().length); renderRoute(); showToast('已加载更多题目'); }); document.querySelector('#noticeButton')?.addEventListener('click', () => showToast('公告详情将在公告模块接入后开放')); }
 function openAddPuzzle(scope = 'library', draft = {}) {
   const isCalendar = scope === 'calendar';
   const initialRule = state.rules.find((rule) => String(draft.ruleId || '') === String(rule.id));
   const initialRuleId = initialRule ? String(initialRule.id) : '';
-  openModal(`<p class="modal-eyebrow">${isCalendar ? 'PRIVATE CALENDAR' : 'NEW LIBRARY ENTRY'}</p><h2 id="modalTitle">${isCalendar ? '提交日历谜题' : '添加一道题目'}</h2><p class="modal-intro">先选择目录中的规则；如果没有合适规则，可以创建后自动返回此表单。</p><div class="form-field"><span id="submissionRuleLabel">规则（必选）</span><div class="submission-rule-picker"><input id="submissionRuleSearch" type="search" role="combobox" aria-labelledby="submissionRuleLabel" aria-autocomplete="list" aria-expanded="false" aria-controls="submissionRuleOptions" aria-required="true" autocomplete="off" value="${initialRule ? esc(ruleDisplayName(initialRule)) : ''}" placeholder="搜索中英文规则或分类" /><input id="submissionRule" type="hidden" value="${esc(initialRuleId)}" /><div class="submission-rule-dropdown" id="submissionRuleDropdown" hidden><div id="submissionRuleOptions" class="submission-rule-options" role="listbox" aria-labelledby="submissionRuleLabel"></div><p id="submissionRuleStatus" class="submission-rule-status" role="status" hidden></p></div></div><button class="text-button rule-create-inline" id="createRuleFromSubmission" type="button">＋ 新建规则</button></div><div id="submissionRulePreview" class="submission-rule-preview"></div><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" value="${esc(draft.title || '')}" placeholder="例如：Five Cells" /></label><label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" value="${esc(draft.url || '')}" placeholder="https://puzz.link/..." /></label><label class="form-field"><span>作者</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || '')}" placeholder="作者名" /></label><label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external" ${draft.inputMode !== 'blank' ? 'selected' : ''}>外部题目（puzz.link / penpa+）</option><option value="blank" ${draft.inputMode === 'blank' ? 'selected' : ''}>纯填空题</option></select></label><label class="form-field"><span>作者说明（可选）</span><textarea id="newPuzzleNote" rows="3" placeholder="简要介绍这道题">${esc(draft.note || '')}</textarea></label><label class="form-field"><span>答案（纯填空题可选）</span><input id="newPuzzleAnswer" type="text" value="${esc(draft.answer || '')}" placeholder="答案" /></label>${isCalendar ? `<label class="form-field"><span>建议日期（可选）</span><input id="newPuzzleDate" type="date" value="${esc(draft.suggestedDate || '')}" /></label>` : ''}<div class="modal-error" id="submissionError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
+  const uploaderName = state.user?.username || state.user?.name || '';
+  const authorFields = isCalendar
+    ? `<label class="form-field"><span>投稿用户</span><input id="newPuzzleUploader" type="text" value="${esc(uploaderName)}" readonly /><span class="form-help">投稿身份由登录账号确定。</span></label><label class="form-field"><span>题目作者 / 署名（可选）</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || uploaderName)}" placeholder="题目作者名" /></label>`
+    : `<label class="form-field"><span>作者</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || '')}" placeholder="作者名" /></label>`;
+  openModal(`<p class="modal-eyebrow">${isCalendar ? 'PRIVATE CALENDAR' : 'NEW LIBRARY ENTRY'}</p><h2 id="modalTitle">${isCalendar ? '提交日历谜题' : '添加一道题目'}</h2><p class="modal-intro">先选择目录中的规则；如果没有合适规则，可以创建后自动返回此表单。</p><div class="form-field"><span id="submissionRuleLabel">规则（必选）</span><div class="submission-rule-picker"><input id="submissionRuleSearch" type="search" role="combobox" aria-labelledby="submissionRuleLabel" aria-autocomplete="list" aria-expanded="false" aria-controls="submissionRuleOptions" aria-required="true" autocomplete="off" value="${initialRule ? esc(ruleDisplayName(initialRule)) : ''}" placeholder="搜索中英文规则或分类" /><input id="submissionRule" type="hidden" value="${esc(initialRuleId)}" /><div class="submission-rule-dropdown" id="submissionRuleDropdown" hidden><div id="submissionRuleOptions" class="submission-rule-options" role="listbox" aria-labelledby="submissionRuleLabel"></div><p id="submissionRuleStatus" class="submission-rule-status" role="status" hidden></p></div></div><button class="text-button rule-create-inline" id="createRuleFromSubmission" type="button">＋ 新建规则</button></div><div id="submissionRulePreview" class="submission-rule-preview"></div><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" value="${esc(draft.title || '')}" placeholder="例如：Five Cells" /></label><label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" value="${esc(draft.url || '')}" placeholder="https://puzz.link/..." /></label>${authorFields}<label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external" ${draft.inputMode !== 'blank' ? 'selected' : ''}>外部题目（puzz.link / penpa+）</option><option value="blank" ${draft.inputMode === 'blank' ? 'selected' : ''}>纯填空题</option></select></label><label class="form-field"><span>作者说明（可选）</span><textarea id="newPuzzleNote" rows="3" placeholder="简要介绍这道题">${esc(draft.note || '')}</textarea></label><label class="form-field"><span>答案（纯填空题可选）</span><input id="newPuzzleAnswer" type="text" value="${esc(draft.answer || '')}" placeholder="答案" /></label>${isCalendar ? `<div class="form-field"><span>建议年份和日期（日期可选）</span>${renderCalendarDateInputs('newPuzzleDate', Number(draft.calendarYear) || 2028, draft.suggestedMonthDay || (draft.suggestedDate ? draft.suggestedDate.slice(5) : ''))}</div>` : ''}<div class="modal-error" id="submissionError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
+  if (isCalendar) bindCalendarDateInputs('newPuzzleDate');
   const searchInput = document.querySelector('#submissionRuleSearch');
   const selectedIdInput = document.querySelector('#submissionRule');
   const dropdown = document.querySelector('#submissionRuleDropdown');
@@ -302,8 +527,10 @@ function openAddPuzzle(scope = 'library', draft = {}) {
     const title = document.querySelector('#newPuzzleTitle').value.trim(); const mode = document.querySelector('#newPuzzleMode').value; const url = document.querySelector('#newPuzzleUrl').value.trim(); const ruleId = document.querySelector('#submissionRule').value;
     if (!title || !ruleId) { document.querySelector('#submissionError').textContent = title ? '请选择规则，或先创建一条新规则。' : '请填写题目标题。'; return; }
     if (mode === 'external' && !isSupportedPuzzleUrl(url)) { document.querySelector('#submissionError').textContent = '外部题目必须使用受支持的 puzz.link、Penpa+ 或同类工具链接。'; return; }
+    const calendarDate = isCalendar ? readCalendarDateFields('newPuzzleDate') : null;
+    if (calendarDate?.error) { document.querySelector('#submissionError').textContent = calendarDate.error; return; }
     const input = { title, ruleId, type: mode === 'blank' ? '填空题' : '逻辑题', author: document.querySelector('#newPuzzleAuthor').value.trim() || state.user.name, source: mode === 'blank' ? '填空题' : getPuzzleSource(url), url, inputMode: mode, answer: document.querySelector('#newPuzzleAnswer').value.trim(), note: document.querySelector('#newPuzzleNote').value.trim() };
-    if (isCalendar) input.suggestedDate = document.querySelector('#newPuzzleDate').value || null;
+    if (isCalendar) { input.author = document.querySelector('#newPuzzleAuthor').value.trim() || state.user.username || state.user.name; input.calendarYear = calendarDate.calendarYear; input.suggestedMonthDay = calendarDate.suggestedMonthDay; }
     const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const errorNode = document.querySelector('#submissionError');
     try {
       const path = isCalendar ? '/api/calendar/puzzles' : '/api/puzzles'; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify(input) });
@@ -313,7 +540,7 @@ function openAddPuzzle(scope = 'library', draft = {}) {
     } catch (error) { if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message; }
   });
 }
-function captureSubmissionDraft() { return { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '', suggestedDate: document.querySelector('#newPuzzleDate')?.value || '' }; }
+function captureSubmissionDraft() { const draft = { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '' }; if (document.querySelector('#newPuzzleDateYear')) Object.assign(draft, readCalendarDateFields('newPuzzleDate')); return draft; }
 function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = {}) {
   const editing = Boolean(rule);
   const rejectedItems = editing ? ['name', 'description', 'example'].filter((item) => rule.quality?.groups?.[item]?.rejected || rule.quality?.groups?.[item]?.status === 'rejected') : [];
@@ -428,14 +655,16 @@ async function submitRuleAudit(ruleId, item, decision, suggestion = '', errorNod
   }
 }
 function bindPuzzle(number, scope = 'library') {
-  const isCalendar = scope === 'calendar'; const puzzle = (isCalendar ? state.calendarPuzzles : state.puzzles).find((item) => Number(item.number) === Number(number));
+  const isCalendar = scope === 'calendar'; const puzzle = (isCalendar ? [...state.calendarPuzzles, ...state.calendarLeftovers] : state.puzzles).find((item) => Number(item.number) === Number(number));
+  if (isCalendar && puzzle) bindCalendarDateInputs('suggestedDateEdit');
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number, scope));
+  document.querySelector('#reenterCalendarPuzzleButton')?.addEventListener('click', () => puzzle && openCalendarReentry(puzzle));
   document.querySelector('#addTagButton')?.addEventListener('click', () => openTagEditor(number));
   document.querySelector('#deleteCalendarPuzzleButton')?.addEventListener('click', (event) => {
     const button = event.currentTarget;
     openDeleteCalendarPuzzleConfirmation({ number: button.dataset.puzzleNumber, deleteToken: button.dataset.deleteToken, title: button.dataset.puzzleTitle, returnRoute: button.dataset.returnRoute });
   });
-  document.querySelector('#saveSuggestedDateButton')?.addEventListener('click', async () => { const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const suggestedDate = document.querySelector('#suggestedDateEdit').value || null; const data = await apiRequest(`/api/calendar/puzzles/${number}`, { method: 'PATCH', body: JSON.stringify({ suggestedDate }) }); state.calendarPuzzles = data.puzzles.map(normalizePuzzle); renderRoute(); showToast('建议日期已保存'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } });
+  document.querySelector('#saveSuggestedDateButton')?.addEventListener('click', async () => { const fields = readCalendarDateFields('suggestedDateEdit'); if (fields.error) { showToast(fields.error); return; } const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const data = await apiRequest(`/api/calendar/puzzles/${number}`, { method: 'PATCH', body: JSON.stringify(fields) }); if (!isCurrentUserSession(requestEpoch, userId)) return; if (Array.isArray(data.puzzles)) state.calendarPuzzles = data.puzzles.map(normalizePuzzle); await refreshCalendarData(requestEpoch, userId); if (!isCurrentUserSession(requestEpoch, userId)) return; renderRoute(); showToast('建议日期已保存'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } });
   if (puzzle) bindBlank(puzzle);
   document.querySelector('#commentButton')?.addEventListener('click', () => showToast('留言功能将在账户系统接入后启用'));
 }
@@ -454,13 +683,9 @@ function openDeleteCalendarPuzzleConfirmation(target) {
       const data = await apiRequest(`/api/calendar/puzzles/${encodeURIComponent(target.number)}`, { method: 'DELETE', body: JSON.stringify({ deleteToken: target.deleteToken }) });
       if (!isCurrentUserSession(requestEpoch, userId)) return;
       if (Array.isArray(data.puzzles)) state.calendarPuzzles = data.puzzles.map(normalizePuzzle);
-      else {
-        const refreshed = await apiRequest('/api/calendar/puzzles');
-        if (!isCurrentUserSession(requestEpoch, userId)) return;
-        state.calendarPuzzles = (refreshed.puzzles || []).map(normalizePuzzle);
-      }
+      await refreshCalendarData(requestEpoch, userId);
       if (!isCurrentUserSession(requestEpoch, userId)) return;
-      state.calendarReturnRoute = target.returnRoute === 'pending' ? 'pending' : 'calendar';
+      state.calendarReturnRoute = ['pending', 'leftovers'].includes(target.returnRoute) ? target.returnRoute : 'calendar';
       const confirmationStillOpen = errorNode.isConnected;
       if (confirmationStillOpen) closeModal();
       window.location.hash = `#${state.calendarReturnRoute}`;
@@ -476,6 +701,7 @@ function openDeleteCalendarPuzzleConfirmation(target) {
 function openTagEditor(number) { openModal(`<p class="modal-eyebrow">PUZZLE TAGS</p><h2 id="modalTitle">添加标签</h2><p class="modal-intro">标签用于题库筛选；题型标签和 Wrong Puzzle、Example Puzzle 等状态标签可以同时存在。</p><label class="form-field"><span>标签名称</span><input id="newTagName" type="text" placeholder="例如：Sudoku" /></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存标签', 'saveTagButton')}</div>`); document.querySelector('#saveTagButton').addEventListener('click', async () => { const tag = document.querySelector('#newTagName').value.trim(); if (!tag) { showToast('请填写标签名称'); return; } const requestEpoch = state.sessionEpoch; const userId = state.user?.id; try { const data = await apiRequest(`/api/puzzles/${number}/tags`, { method: 'POST', body: JSON.stringify({ tag }) }); applyPuzzleData(data.puzzles); closeModal(); renderRoute(); showToast('标签已保存'); } catch (error) { if (isCurrentUserSession(requestEpoch, userId)) showToast(error.message); } }); }
 function bindBlank(puzzle) { document.querySelector('#checkBlankButton')?.addEventListener('click', () => { const answer = document.querySelector('#blankAnswer').value.trim().toLowerCase(); const expected = String(puzzle.answer || '').toLowerCase(); const result = document.querySelector('#blankResult'); if (!answer) { result.textContent = '请填写答案。'; result.className = 'blank-result error'; } else if (expected && answer === expected) { result.textContent = '答案正确，可以提交完成记录。'; result.className = 'blank-result success'; } else { result.textContent = expected ? '还不正确，再试一次。' : '答案已记录，点击完成后进行评分。'; result.className = 'blank-result'; } }); }
 function bindCalendar(routeName = 'calendar') { const origin = routeName === 'pending' ? 'pending' : 'calendar'; const openSubmission = () => { state.calendarReturnRoute = origin; openAddPuzzle('calendar'); }; document.querySelector('#addCalendarPuzzleButton')?.addEventListener('click', openSubmission); document.querySelector('#emptyCalendarAdd')?.addEventListener('click', openSubmission); document.querySelector('#calendarSort')?.addEventListener('change', (event) => { state.calendarSort = event.target.value; renderRoute(); }); document.querySelectorAll('.calendar-row').forEach((row) => row.addEventListener('click', () => { state.calendarReturnRoute = origin; })); }
+function bindLeftovers() { document.querySelectorAll('.calendar-row').forEach((row) => row.addEventListener('click', () => { state.calendarReturnRoute = 'leftovers'; })); }
 
 function renderHome() { return `<div class="page-wrap-inner home-page"><section class="workspace-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>PUZZLE ARCHIVE</p><h1>工作台<span class="heading-period">.</span></h1><p class="page-description">从公告开始，进入题库、题集和索引。</p></div></section><section class="home-notice-board"><div class="notice-strip" aria-label="公告"><div class="notice-symbol">✦</div><div class="notice-copy"><span class="notice-kicker">公告 · OCT 2026</span><strong>秋季谜题交换开始了</strong><span>提交你的原创题目，和朋友交换一场解题。</span></div><button class="text-button" type="button" id="noticeButton">查看公告 <span>→</span></button></div><div class="notice-strip notice-strip-secondary"><div class="notice-symbol">◎</div><div class="notice-copy"><span class="notice-kicker">最近更新 · OCT 2026</span><strong>题库持续更新</strong><span>探索公开题库，或进入受信任成员的日历与规则目录。</span></div><a class="text-button" href="#library">进入题库 <span>→</span></a></div></section><section class="home-links"><a href="#library" class="home-link-card"><span class="home-link-icon">▤</span><span><small>EXPLORE</small><strong>题库</strong><em>${state.puzzles.length} 道题目 →</em></span></a><a href="#collections" class="home-link-card"><span class="home-link-icon">▥</span><span><small>CURATED</small><strong>题集列表</strong><em>${state.collections.length} 个题集 →</em></span></a><a href="#files" class="home-link-card"><span class="home-link-icon">⌘</span><span><small>ORGANIZE</small><strong>索引与文件</strong><em>按来源与年份浏览 →</em></span></a><a href="#calendar" class="home-link-card"><span class="home-link-icon">▦</span><span><small>TRUSTED SPACE</small><strong>谜题日历</strong><em>${state.calendarPuzzles.length} 道日历谜题 →</em></span></a><a href="#rules" class="home-link-card"><span class="home-link-icon">≡</span><span><small>CATALOG</small><strong>规则管理</strong><em>${state.rules.length} 条规则 →</em></span></a></section></div>`; }
 
@@ -504,13 +730,26 @@ function renderRoute() {
   authButton.innerHTML = '退出 <span>↗</span>';
   authButton.setAttribute('aria-label', '退出登录');
   document.querySelector('#syncStatusText').textContent = state.user ? '私人数据库已连接' : state.serviceError ? '服务不可用' : '等待登录';
+  const inboxButton = document.querySelector('#inboxButton');
+  const inboxBadge = document.querySelector('#inboxUnreadBadge');
+  if (inboxButton && inboxBadge) {
+    inboxBadge.hidden = state.inboxUnreadCount <= 0;
+    inboxBadge.textContent = state.inboxUnreadCount > 99 ? '99+' : String(state.inboxUnreadCount);
+    inboxButton.setAttribute('aria-label', `收件箱，${state.inboxUnreadCount} 条未读`);
+    inboxButton.title = state.inboxUnreadCount ? `收件箱：${state.inboxUnreadCount} 条未读` : '收件箱';
+  }
   if (!state.sessionChecked || !state.user) { app.innerHTML = renderAuthGate(); document.querySelector('#retrySessionButton')?.addEventListener('click', bootstrapDatabase); bindAuthGate(); return; }
   if (state.privateLoading) { app.innerHTML = '<div class="page-wrap-inner"><div class="empty-state" role="status">正在加载私人数据…</div></div>'; return; }
   if (state.serviceError) { app.innerHTML = `<div class="page-wrap-inner"><div class="error-state" role="alert"><strong>私人数据暂时无法加载</strong><p>${esc(state.serviceError)}</p><button class="button button-light" type="button" id="retryPrivateButton">重试</button></div></div>`; document.querySelector('#retryPrivateButton')?.addEventListener('click', loadPrivateData); return; }
-  app.innerHTML = route.name === 'rules' ? renderRules() : route.name === 'calendar-puzzle' ? renderPuzzlePage(route.number, 'calendar') : renderCalendar(route.name === 'pending');
+  const enteredMessages = route.name === 'messages' && state.lastPrivateRouteName !== 'messages';
+  state.lastPrivateRouteName = route.name;
+  app.innerHTML = route.name === 'rules' ? renderRules() : route.name === 'calendar-puzzle' ? renderPuzzlePage(route.number, 'calendar') : route.name === 'leftovers' ? renderCalendarLeftovers() : route.name === 'messages' ? renderMessages() : renderCalendar(route.name === 'pending');
   if (['calendar', 'pending'].includes(route.name)) bindCalendar(route.name);
+  if (route.name === 'leftovers') bindLeftovers();
+  if (route.name === 'messages') bindMessages();
   if (route.name === 'rules') { document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor()); bindRuleCatalog(); }
   if (route.name === 'calendar-puzzle') bindPuzzle(route.number, 'calendar');
+  if (enteredMessages) void loadInboxFresh();
 }
 function bindFiles() { document.querySelector('#newFolderButton')?.addEventListener('click', openNewFolder); document.querySelector('#newFolderCard')?.addEventListener('click', openNewFolder); document.querySelectorAll('[data-folder]').forEach((folder) => folder.addEventListener('click', () => { state.filePath = ['全部文件', folder.querySelector('strong').textContent]; renderRoute(); showToast(`已打开文件夹：${state.filePath[1]}`); })); document.querySelector('[data-file-home]')?.addEventListener('click', () => { state.filePath = ['全部文件']; renderRoute(); }); document.querySelector('#sortFilesButton')?.addEventListener('click', (event) => { event.currentTarget.textContent = event.currentTarget.textContent === '按最近更新' ? '按名称排序' : '按最近更新'; showToast('文件排序方式已切换'); }); }
 function openNewFolder() { openModal(`<p class="modal-eyebrow">FILE MANAGER</p><h2 id="modalTitle">新建文件夹</h2><p class="modal-intro">文件夹可以表示来源、年份或题集，并且可以继续嵌套。</p><label class="form-field"><span>文件夹名称</span><input id="newFolderName" type="text" placeholder="例如：2026" /></label><label class="form-field"><span>上级文件夹（可选）</span><select id="newFolderParent"><option value="">根目录</option>${state.folders.map((folder) => `<option value="${esc(folder.id)}">${esc(folder.name)}</option>`).join('')}</select></label><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('创建文件夹', 'createFolderButton')}</div>`); document.querySelector('#createFolderButton').addEventListener('click', async () => { const name = document.querySelector('#newFolderName').value.trim(); if (!name) { showToast('请填写文件夹名称'); return; } const parent = document.querySelector('#newFolderParent').value || null; try { const data = await apiRequest('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId: parent }) }); state.folders = data.folders.map((folder) => ({ id: String(folder.id), name: folder.name, count: folder.count, parent: folder.parent })); closeModal(); renderRoute(); showToast(`文件夹「${name}」已创建`); } catch (error) { showToast(error.message); } }); }
@@ -603,6 +842,7 @@ async function logout() {
 }
 document.querySelector('#loginButton').addEventListener('click', logout);
 document.querySelector('#profileButton').addEventListener('click', logout);
+document.querySelector('#inboxButton')?.addEventListener('click', () => { if (state.user && getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
 window.addEventListener('hashchange', renderRoute);
 renderRoute();

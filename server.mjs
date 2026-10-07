@@ -9,12 +9,14 @@ import {
   authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
   getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
-  updateRule, deleteRule, deleteCalendarPuzzle
+  updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
+  reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
 } from './db.mjs';
 import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
 import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
+import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES, CALENDAR_APPROVAL_NET_SUPPORT, normalizeCalendarReviewInput } from './calendar-review-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir,'data');
@@ -22,7 +24,7 @@ const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'truste
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
 const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs']);
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs']);
 const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
@@ -118,6 +120,20 @@ function validDate(value) {
   if (typeof value!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [y,m,d]=value.split('-').map(Number); const dt=new Date(Date.UTC(y,m-1,d));
   return dt.getUTCFullYear()===y && dt.getUTCMonth()===m-1 && dt.getUTCDate()===d;
+}
+function normalizeCalendarDateFields(input) {
+  const legacyDate=Object.hasOwn(input,'suggestedDate')&&input.suggestedDate!==null&&input.suggestedDate!==''?input.suggestedDate:null;
+  if (legacyDate!==null&&!validDate(legacyDate)) return {error:'suggestedDate must be a real YYYY-MM-DD date or null'};
+  const suggestedMonthDay=Object.hasOwn(input,'suggestedMonthDay')
+    ? (input.suggestedMonthDay===null||input.suggestedMonthDay===''?'':input.suggestedMonthDay)
+    : (legacyDate?legacyDate.slice(5):'');
+  if (typeof suggestedMonthDay!=='string'||(suggestedMonthDay!==''&&!/^\d{2}-\d{2}$/.test(suggestedMonthDay))) return {error:'suggestedMonthDay must be MM-DD or empty'};
+  const legacyYear=legacyDate?Number(legacyDate.slice(0,4)):null;
+  const calendarYear=input.calendarYear===undefined?(legacyYear??2028):input.calendarYear;
+  if (!Number.isInteger(calendarYear)||calendarYear<1000||calendarYear>9999) return {error:'calendarYear must be an integer from 1000 to 9999'};
+  if (legacyYear!==null&&legacyYear!==calendarYear) return {error:'suggestedDate year must match calendarYear'};
+  if (suggestedMonthDay&&!validDate(`${calendarYear}-${suggestedMonthDay}`)) return {error:'suggestedMonthDay is not a valid date in calendarYear'};
+  return {value:{calendarYear,suggestedMonthDay,suggestedDate:suggestedMonthDay?`${calendarYear}-${suggestedMonthDay}`:null}};
 }
 function normalizeRuleInput(input,previous=null,ruleId=null) {
   const takeText=(key,max,fallback='')=>{
@@ -229,6 +245,25 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && collectionMatch) { const collection=getCollection(Number(collectionMatch[1]),user.id); return collection?sendJson(response,200,{collection}):sendJson(response,404,{error:'collection not found'}); }
 
   if (request.method==='GET' && pathname==='/api/rules') return sendJson(response,200,{rules:getRules(user.id)});
+  if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,approvalNetSupport:CALENDAR_APPROVAL_NET_SUPPORT});
+  if (request.method==='GET' && pathname==='/api/inbox') {
+    const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
+    const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before');
+    const limit=rawLimit===null?30:Number(rawLimit),before=rawBefore===null?null:Number(rawBefore);
+    if (!Number.isInteger(limit)||limit<1||limit>50||(before!==null&&(!Number.isSafeInteger(before)||before<1))) return sendJson(response,400,{error:'invalid inbox cursor'});
+    return sendJson(response,200,getInbox(user.id,{limit,before}));
+  }
+  if (request.method==='POST'&&pathname==='/api/inbox/read-all') {
+    markAllInboxNotificationsRead(user.id);
+    return sendJson(response,200,{read:true,...getInbox(user.id,{limit:1})});
+  }
+  const inboxReadMatch=pathname.match(/^\/api\/inbox\/(\d+)\/read$/);
+  if (request.method==='POST'&&inboxReadMatch) {
+    const id=Number(inboxReadMatch[1]);
+    if (!Number.isSafeInteger(id)||id<1) return sendJson(response,404,{error:'notification not found'});
+    if (!markInboxNotificationRead(user.id,id)) return sendJson(response,404,{error:'notification not found'});
+    return sendJson(response,200,{read:true,...getInbox(user.id,{limit:1})});
+  }
   const ruleMatch=pathname.match(/^\/api\/rules\/(\d+)$/);
   if (request.method==='GET' && ruleMatch) { const rule=getRule(Number(ruleMatch[1]),user.id); return rule?sendJson(response,200,{rule}):sendJson(response,404,{error:'rule not found'}); }
   if (request.method==='POST' && pathname==='/api/rules') {
@@ -278,25 +313,46 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   }
 
   if (request.method==='GET' && pathname==='/api/calendar/puzzles') return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
+  if (request.method==='GET' && pathname==='/api/calendar/leftovers') return sendJson(response,200,{puzzles:getCalendarLeftovers(user.id)});
   const calendarMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)$/);
   if (request.method==='GET' && calendarMatch) { const puzzle=getCalendarPuzzle(Number(calendarMatch[1]),user.id); return puzzle?sendJson(response,200,{puzzle}):sendJson(response,404,{error:'puzzle not found'}); }
   if (request.method==='POST' && pathname==='/api/calendar/puzzles') {
     const input=await readJson(request);
-    if (!validText(input.title,200,true)||!validText(input.author,200,true)||!validText(input.source,120,true)||(input.url!==undefined&&!validText(input.url,3000))||(input.note!==undefined&&!validText(input.note,2000))||!['external','blank'].includes(input.inputMode)) return sendJson(response,400,{error:'invalid puzzle fields'});
+    if (!validText(input.title,200,true)||(input.author!==undefined&&!validText(input.author,200))||!validText(input.source,120,true)||(input.url!==undefined&&!validText(input.url,3000))||(input.note!==undefined&&!validText(input.note,2000))||!['external','blank'].includes(input.inputMode)) return sendJson(response,400,{error:'invalid puzzle fields'});
     if (!getRule(Number(input.ruleId))) return sendJson(response,400,{error:'a valid ruleId is required'});
     if (input.inputMode==='external' && !parseTrustedPuzzleUrl(input.url)) return sendJson(response,400,{error:'only supported puzzle tool URLs are allowed'});
-    if (!validDate(input.suggestedDate)) return sendJson(response,400,{error:'suggestedDate must be a real YYYY-MM-DD date or null'});
+    const dateFields=normalizeCalendarDateFields(input);
+    if (dateFields.error) return sendJson(response,400,{error:dateFields.error});
     if (input.inputMode==='blank' && !validText(input.answer||'',2000)) return sendJson(response,400,{error:'invalid answer'});
-    const created=addCalendarPuzzle(input,user);
+    const author=(input.author===undefined||!input.author.trim())?(user.username||user.name):input.author.trim();
+    const created=addCalendarPuzzle({...input,author,...dateFields.value},user);
     if (created.error==='missing-rule') return sendJson(response,409,{error:'rule is no longer available; reload before submitting'});
     const puzzles=getCalendarPuzzles(user.id);
     return sendJson(response,201,{...created,puzzles});
   }
   const calendarRating=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/complete-rating$/);
   if (request.method==='POST' && calendarRating) {
-    const number=Number(calendarRating[1]); if (!calendarPuzzleExists(number)) return sendJson(response,404,{error:'puzzle not found'});
-    const input=await readJson(request); if (!validateRatings(input)) return sendJson(response,400,{error:'ratings must be integers from 1 to 5'});
-    completeAndRate(number,user.id,[input.logic,input.intuition,input.enjoyment],'calendar'); return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
+    const number=Number(calendarRating[1]);
+    if (!Number.isSafeInteger(number)||number<1||!calendarPuzzleExists(number)) return sendJson(response,404,{error:'puzzle not found'});
+    const input=await readJson(request),normalized=normalizeCalendarReviewInput(input);
+    if (normalized.error) return sendJson(response,400,{error:'difficulty, tags, vote, and expectedReviewRound are required and must be valid'});
+    const result=completeCalendarReview(number,user.id,normalized.value);
+    if(result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
+    if(result.error==='stale-round') return sendJson(response,409,{error:'review round changed; reload the puzzle'});
+    if(result.error==='reentry-required') return sendJson(response,409,{error:'puzzle needs explicit reentry before another review round'});
+    if(result.error==='veto-locked') return sendJson(response,409,{error:'a veto is final for this review round'});
+    if(result.error) return sendJson(response,401,{error:'active member session required'});
+    return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
+  }
+  const calendarReenter=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/reenter$/);
+  if(request.method==='POST'&&calendarReenter){
+    const number=Number(calendarReenter[1]),input=await readJson(request);
+    if(!Number.isSafeInteger(number)||number<1||!Number.isSafeInteger(input.expectedReviewRound)||input.expectedReviewRound<1) return sendJson(response,400,{error:'expectedReviewRound is required'});
+    const result=reenterCalendarPuzzle(number,user.id,input.expectedReviewRound);
+    if(result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
+    if(result.error==='stale-round') return sendJson(response,409,{error:'review round changed; reload before reentry'});
+    if(result.error==='not-leftover') return sendJson(response,409,{error:'only leftover puzzles can be reentered'});
+    return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
   }
   const calendarTag=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/tags$/);
   if (request.method==='POST' && calendarTag) {
@@ -306,8 +362,15 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   }
   if (request.method==='PATCH' && calendarMatch) {
     const number=Number(calendarMatch[1]), input=await readJson(request);
-    if (!validDate(input.suggestedDate)) return sendJson(response,400,{error:'suggestedDate must be a real YYYY-MM-DD date or null'});
-    const result=updateCalendarSuggestedDate(number,user.id,input.suggestedDate||null);
+    if (!Object.hasOwn(input,'suggestedDate')&&!Object.hasOwn(input,'suggestedMonthDay')&&!Object.hasOwn(input,'calendarYear')) return sendJson(response,400,{error:'calendarYear or suggestedMonthDay is required'});
+    const currentPuzzle=getCalendarPuzzle(number,user.id);
+    if(!currentPuzzle) return sendJson(response,404,{error:'puzzle not found'});
+    const dateInput={...input};
+    if(dateInput.calendarYear===undefined&&dateInput.suggestedDate===null) dateInput.calendarYear=currentPuzzle.calendarYear;
+    if(dateInput.calendarYear===undefined&&dateInput.suggestedDate===undefined) dateInput.calendarYear=currentPuzzle.calendarYear;
+    const dateFields=normalizeCalendarDateFields(dateInput);
+    if (dateFields.error) return sendJson(response,400,{error:dateFields.error});
+    const result=updateCalendarSuggestedDate(number,user.id,dateFields.value.calendarYear,dateFields.value.suggestedDate);
     if (result.missing) return sendJson(response,404,{error:'puzzle not found'});
     if (result.forbidden) return sendJson(response,403,{error:'only the uploader may change suggestedDate'});
     return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
