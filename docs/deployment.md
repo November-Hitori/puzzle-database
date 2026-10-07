@@ -14,7 +14,7 @@ The app runs as the dedicated `puzarchive` system user. Code and the pinned Node
 
 The runtime is Node.js 22.23.3 for Linux x64, downloaded from the official Node.js distribution and checked against SHA-256 `df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de`. The app uses Node's built-in SQLite module and has no production npm dependencies.
 
-The initial install stages an app-only copy and a consistent snapshot containing `puzarchive.sqlite` and `trusted-users.json`, then runs `deploy/install.sh` as root. The installer refuses to overwrite an existing app, runtime, or database. It installs and enables the app service and daily backup timer. For a later code update, stage and review a new release separately; do not rerun the initial installer over an existing deployment.
+The initial install stages an app-only copy and a consistent snapshot containing `puzarchive.sqlite` and `trusted-users.json`, then runs `deploy/install.sh` as root. The installer refuses to overwrite an existing app, runtime, or database. It installs and enables the app service and daily backup timer. For a later code update, stage and review a new release separately; do not rerun the initial installer over an existing deployment. Before activation, ensure the staged app has an empty `data/` directory owned by `root:root` with mode `0755`: startup creates this default directory even when the database paths point to `/var/lib/puzarchive`, and the service keeps app code read-only. Never copy the live database or member configuration into the app directory.
 
 ## Backups and restore checks
 
