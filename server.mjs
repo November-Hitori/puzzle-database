@@ -11,7 +11,7 @@ import {
   getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate, updateRule
 } from './db.mjs';
 import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
-import { validateRuleExampleUrl } from './rule-policy.mjs';
+import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 
@@ -125,8 +125,8 @@ function normalizeRuleInput(input,previous=null,ruleId=null) {
     if (!validText(value,max)) return {error:`invalid ${key}`};
     return {value:value.trim()};
   };
-  const titleZh=takeText('titleZh',160),titleEn=takeText('titleEn',160),exampleUrl=takeText('exampleUrl',3000);
-  if (titleZh.error||titleEn.error||exampleUrl.error) return {error:titleZh.error||titleEn.error||exampleUrl.error};
+  const titleZh=takeText('titleZh',160),titleEn=takeText('titleEn',160),exampleUrl=takeText('exampleUrl',RULE_EXAMPLE_URL_MAX_LENGTH),exampleAuthor=takeText('exampleAuthor',200);
+  if (titleZh.error||titleEn.error||exampleUrl.error||exampleAuthor.error) return {error:titleZh.error||titleEn.error||exampleUrl.error||exampleAuthor.error};
   if (!titleZh.value&&!titleEn.value) return {error:'at least one Chinese or English name is required'};
   const clauses={};
   for (const key of ['rulesZh','rulesEn']) {
@@ -150,7 +150,7 @@ function normalizeRuleInput(input,previous=null,ruleId=null) {
   } else baseRuleId=null;
   if (previous&&!previous.isVariant&&isVariant&&ruleHasVariants(ruleId)) return {error:'a rule used as another variant base cannot itself become a variant'};
   if (exampleUrl.value&&!validateRuleExampleUrl(exampleUrl.value)) return {error:'exampleUrl must be a concrete Penpa puzzle URL'};
-  return {value:{titleZh:titleZh.value,titleEn:titleEn.value,...clauses,category,isVariant,baseRuleId,exampleUrl:exampleUrl.value}};
+  return {value:{titleZh:titleZh.value,titleEn:titleEn.value,...clauses,category,isVariant,baseRuleId,exampleUrl:exampleUrl.value,exampleAuthor:exampleAuthor.value}};
 }
 function ensurePublicPuzzle(number) { return Boolean(getPuzzles('scope-check').some((p)=>p.number===number)); }
 function validateRatings(input) { return ['logic','intuition','enjoyment'].every((key)=>Number.isInteger(input[key])&&input[key]>=1&&input[key]<=5); }

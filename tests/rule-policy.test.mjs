@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_REQUIRED_APPROVALS, validateRuleExampleUrl } from '../rule-policy.mjs';
+import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_EXAMPLE_URL_MAX_LENGTH, RULE_REQUIRED_APPROVALS, validateRuleExampleUrl } from '../rule-policy.mjs';
 
 test('rule quality derives bilingual deficits and variant base requirements',()=>{
   const draft={titleZh:'中文名',titleEn:'',rulesZh:['中文说明'],rulesEn:[],isVariant:true,baseRuleId:null,exampleUrl:''};
@@ -19,5 +19,10 @@ test('example URL policy allows a blank draft but only concrete Penpa links',()=
   assert.equal(validateRuleExampleUrl('https://puzz.link/p?slither/6/6/abc'),false);
   assert.equal(validateRuleExampleUrl('javascript:alert(1)'),false);
   assert.equal(validateRuleExampleUrl('https://penpa-edit.com:444/?m=edit&p=sample'),false);
-  assert.equal(validateRuleExampleUrl('x'.repeat(3001)),false);
+  const prefix='https://penpa-edit.com/?m=edit&p=';
+  const atLimit=prefix+'x'.repeat(RULE_EXAMPLE_URL_MAX_LENGTH-prefix.length);
+  assert.equal(atLimit.length,RULE_EXAMPLE_URL_MAX_LENGTH);
+  assert.equal(validateRuleExampleUrl(atLimit),true);
+  assert.equal(validateRuleExampleUrl(`${atLimit}x`),false);
+  assert.equal(validateRuleExampleUrl('https://swaroopg92.github.io/penpa-edit/#m=edit&p='+'x'.repeat(3300)),true);
 });

@@ -2,6 +2,7 @@ import { isConcretePenpaPuzzleUrl } from './puzzle-url.mjs';
 
 export const RULE_AUDIT_ITEMS=Object.freeze(['name','description','example']);
 export const RULE_REQUIRED_APPROVALS=3;
+export const RULE_EXAMPLE_URL_MAX_LENGTH=4096;
 
 export function getRuleFieldErrors(rule) {
   const errors=[];
@@ -20,5 +21,5 @@ export function isRuleItemComplete(rule,item) {
 }
 
 export function validateRuleExampleUrl(value) {
-  return typeof value==='string' && (value.trim()==='' || (value.length<=3000 && isConcretePenpaPuzzleUrl(value.trim())));
+  return typeof value==='string' && (value.trim()==='' || (value.length<=RULE_EXAMPLE_URL_MAX_LENGTH && isConcretePenpaPuzzleUrl(value.trim())));
 }

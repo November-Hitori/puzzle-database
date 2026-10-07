@@ -54,6 +54,33 @@ sudo -u puzarchive /opt/puzarchive/runtime/bin/node \
 
 The check runs SQLite `integrity_check`, verifies member IDs against SQLite's trusted-user registry, and prints table counts without showing member names or invitation codes. To rehearse a restore, copy one backup into a new private temporary directory, run this check, and start an isolated app process with `PUZARCHIVE_DB_PATH` and `PUZARCHIVE_USERS_PATH` pointing into that directory on a different loopback port. Do not copy a backup over the live database while the service is running. For an actual restore, stop the service, preserve the current live files as a separate rollback copy, restore both backup files with owner `puzarchive:puzarchive` and mode `0600`, then start the service and check its health locally through SSH forwarding.
 
+## Bulk rule import
+
+The calendar workbook is private source data and is not part of the release. Prepare it locally with Python 3's standard library; the link column is required because the workbook has separate example and edit links. For the current workbook, use `AD` (the example-link column), not `AE`:
+
+```sh
+umask 077
+work_dir=$(mktemp -d /tmp/puzarchive-rule-import.XXXXXX)
+chmod 0700 "$work_dir"
+python3 tools/prepare-rule-import.py \
+  --workbook ../2027谜题日历.xlsx --link-column AD \
+  --payload "$work_dir/payload.json" --report "$work_dir/report.json"
+node scripts/import-rules.mjs --payload "$work_dir/payload.json"
+```
+
+Preparation scans rows 3–384, sorts numeric AF clause keys, maps the six source categories to the application's category names, and leaves English rules empty rather than translating. Blank rules, names in only one language, authors, or example links are retained as drafts; a row with neither name or an invalid category is skipped. Nonempty malformed AF data and filled unsupported links are reported. It recognizes concrete Penpa URLs on supported hosts, including the known `#m=edit|solve&p=...` fragment form; rule example URLs are capped at 4,096 characters. TinyURL requests are limited to `tinyurl.com`; redirect chains are bounded and stop at a concrete trusted Penpa URL without fetching the destination. A trusted HTTP Penpa destination is canonicalized to HTTPS without fetching it. Network-layer failures abort preparation without classifying those links as damaged; other HTTP, untrusted, or malformed destinations are reported and skipped. Keep the report and payload in the mode-`0700` temporary directory; they contain workbook content. Review the JSON report, especially skipped rows and duplicate-title conflicts, before any import. Rows sharing a normalized Chinese name are deduplicated by earliest valid source row; when Chinese is blank, English is a fallback key only among other Chinese-empty rows. Conflicting fields are reported, never merged.
+
+The importer defaults to database-free dry-run validation. It never creates or migrates a database. Only after the release has passed the full [contribution workflow](contribution-workflow.md), independent review, and a fresh private online backup may the prepared payload be copied to a private location on the server and explicitly applied. Keep that payload mode `0600`, owned by `puzarchive`, and run the following as that service account:
+
+```sh
+sudo -u puzarchive /opt/puzarchive/runtime/bin/node \
+  /opt/puzarchive/app/scripts/import-rules.mjs \
+  --payload /var/lib/puzarchive/rule-import/payload.json \
+  --apply --db /var/lib/puzarchive/puzarchive.sqlite
+```
+
+The apply step takes one `BEGIN IMMEDIATE` transaction, skips existing normalized Chinese names without modifying them, and inserts new rules with initial revision snapshots but no approvals or audit votes. It does not touch users, sessions, registration settings, existing rule IDs, puzzles, ratings, completions, or collections. A rerun is idempotent. Retain the private report and backup under the normal protected-data policy; do not place the workbook or payload under the public app tree or commit either to Git.
+
 ## Administration
 
 ### Membership and accounts
@@ -79,7 +106,7 @@ Rotating the shared code affects only future registrations; existing account cre
 
 Authenticated members can create and edit rule drafts. Creation requires a category and at least one Chinese or English name; all other content can be added later. The service reports missing Chinese/English names, descriptions, example links, and variant bases as quality errors. A supplied example must be a concrete supported Penpa puzzle URL; empty is allowed while drafting. Variant bases are optional for drafts but, when supplied, must refer to a different original rule.
 
-Each rule has three independent audit groups: bilingual name, bilingual description plus variant semantics, and example URL. A group is approved only after three distinct active accounts approve the current revision. Repeated approval by the same account is idempotent. Any current-revision rejection blocks approval until that group's content is meaningfully edited; rejection suggestions are optional. Editing one group advances only its revision and preserves all earlier review events and content snapshots. Category edits do not reset audit groups, but a separate edit version prevents stale saves from overwriting concurrent changes. Quality errors and warnings are computed by the server and returned with `GET /api/rules`.
+Each rule has three independent audit groups: bilingual name, bilingual description plus variant semantics, and example URL plus optional example author. Example URLs may be up to 4,096 characters. A group is approved only after three distinct active accounts approve the current revision. Repeated approval by the same account is idempotent. Any current-revision rejection blocks approval until that group's content is meaningfully edited; rejection suggestions are optional. Editing one group advances only its revision and preserves all earlier review events and content snapshots. Category edits do not reset audit groups, but a separate edit version prevents stale saves from overwriting concurrent changes. Quality errors and warnings are computed by the server and returned with `GET /api/rules`.
 
 Inspect the service and loopback listener with:
 

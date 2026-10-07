@@ -202,7 +202,9 @@ button { cursor: pointer; }
 .rule-quality-messages .error { color: var(--accent-deep); }
 .rule-quality-messages .warning { color: #806728; }
 .rule-missing { margin: 0; color: var(--muted); font-size: 11px; font-style: italic; }
-.rule-example-link { display: inline-flex; margin-top: 16px; padding: 8px 10px; border: 1px solid #cbd8cb; border-radius: 4px; background: #f3f8f2; color: #5f8368; font-size: 10px; }
+.rule-example { margin-top: 16px; }
+.rule-example-author { margin: 0 0 7px; color: var(--muted); font-size: 11px; }
+.rule-example-link { display: inline-flex; margin-top: 0; padding: 8px 10px; border: 1px solid #cbd8cb; border-radius: 4px; background: #f3f8f2; color: #5f8368; font-size: 10px; }
 .rule-audit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 20px; padding-top: 17px; border-top: 1px solid var(--line); }
 .rule-audit-item { min-width: 0; padding: 12px; border: 1px solid var(--line); background: #fffefa; }
 .rule-audit-item.is-approved { border-color: #c8d8c8; background: #f7faf5; }

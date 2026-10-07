@@ -94,6 +94,7 @@ database.exec(`
     is_variant INTEGER NOT NULL CHECK (is_variant IN (0,1)),
     base_rule_id INTEGER REFERENCES rules(id),
     example_url TEXT NOT NULL DEFAULT '',
+    example_author TEXT NOT NULL DEFAULT '',
     name_revision INTEGER NOT NULL DEFAULT 1,
     description_revision INTEGER NOT NULL DEFAULT 1,
     example_revision INTEGER NOT NULL DEFAULT 1,
@@ -164,7 +165,7 @@ for (const [name, definition] of [['username', 'TEXT'], ['username_key', 'TEXT']
 }
 database.exec("CREATE UNIQUE INDEX IF NOT EXISTS trusted_users_username_key ON trusted_users(username_key) WHERE username_key IS NOT NULL");
 const ruleColumns=new Set(database.prepare('PRAGMA table_info(rules)').all().map((column)=>column.name));
-for (const [name,definition] of [['example_url',"TEXT NOT NULL DEFAULT ''"],['name_revision','INTEGER NOT NULL DEFAULT 1'],['description_revision','INTEGER NOT NULL DEFAULT 1'],['example_revision','INTEGER NOT NULL DEFAULT 1'],['edit_version','INTEGER NOT NULL DEFAULT 1']]) {
+for (const [name,definition] of [['example_url',"TEXT NOT NULL DEFAULT ''"],['example_author',"TEXT NOT NULL DEFAULT ''"],['name_revision','INTEGER NOT NULL DEFAULT 1'],['description_revision','INTEGER NOT NULL DEFAULT 1'],['example_revision','INTEGER NOT NULL DEFAULT 1'],['edit_version','INTEGER NOT NULL DEFAULT 1']]) {
   if (!ruleColumns.has(name)) database.exec(`ALTER TABLE rules ADD COLUMN ${name} ${definition}`);
 }
 const seedRuleRevision=database.prepare(`INSERT OR IGNORE INTO rule_item_revisions(rule_id,item,revision,content_json)
@@ -172,7 +173,7 @@ const seedRuleRevision=database.prepare(`INSERT OR IGNORE INTO rule_item_revisio
 for (const row of database.prepare('SELECT * FROM rules').all()) {
   seedRuleRevision.run(row.id,'name',row.name_revision,JSON.stringify({titleZh:row.title_zh,titleEn:row.title_en}));
   seedRuleRevision.run(row.id,'description',row.description_revision,JSON.stringify({rulesZh:JSON.parse(row.rules_zh),rulesEn:JSON.parse(row.rules_en),isVariant:Boolean(row.is_variant),baseRuleId:row.base_rule_id}));
-  seedRuleRevision.run(row.id,'example',row.example_revision,JSON.stringify({exampleUrl:row.example_url}));
+  seedRuleRevision.run(row.id,'example',row.example_revision,JSON.stringify({exampleUrl:row.example_url,exampleAuthor:row.example_author??''}));
 }
 
 const puzzleCount = database.prepare('SELECT COUNT(*) AS count FROM puzzles').get().count;
@@ -280,7 +281,7 @@ const ruleFromRow = (row) => row && ({
   id: row.id, titleZh: row.title_zh, titleEn: row.title_en,
   rulesZh: JSON.parse(row.rules_zh), rulesEn: JSON.parse(row.rules_en),
   category: row.category, isVariant: Boolean(row.is_variant), baseRuleId: row.base_rule_id,
-  exampleUrl: row.example_url,
+  exampleUrl: row.example_url, exampleAuthor: row.example_author ?? '',
   editVersion: row.edit_version,
   revisions: {name:row.name_revision,description:row.description_revision,example:row.example_revision},
   ...(row.base_title_zh ? { baseRuleTitleZh: row.base_title_zh } : {}),
@@ -290,7 +291,7 @@ const ruleFromRow = (row) => row && ({
 function contentForRule(rule,item) {
   if (item==='name') return {titleZh:rule.titleZh,titleEn:rule.titleEn};
   if (item==='description') return {rulesZh:rule.rulesZh,rulesEn:rule.rulesEn,isVariant:rule.isVariant,baseRuleId:rule.baseRuleId};
-  return {exampleUrl:rule.exampleUrl};
+  return {exampleUrl:rule.exampleUrl,exampleAuthor:rule.exampleAuthor??''};
 }
 function attachRuleQuality(rule,userId) {
   if (!rule) return null;
@@ -309,7 +310,7 @@ function attachRuleQuality(rule,userId) {
     const revisions=database.prepare(`SELECT r.revision,r.content_json AS content,r.changed_by_user_id AS changedByUserId,u.name AS changedByName,u.username AS changedByUsername,r.created_at AS createdAt
       FROM rule_item_revisions r LEFT JOIN trusted_users u ON u.id=r.changed_by_user_id
       WHERE r.rule_id=? AND r.item=? ORDER BY r.revision`).all(rule.id,item).map((row)=>({
-        revision:row.revision,content:JSON.parse(row.content),
+      revision:row.revision,content:(()=>{const content=JSON.parse(row.content);if(item==='example'&&!Object.hasOwn(content,'exampleAuthor'))content.exampleAuthor='';return content;})(),
         changedBy:row.changedByUserId?{userId:row.changedByUserId,name:row.changedByName,username:row.changedByUsername}:null,
         createdAt:row.createdAt
       }));
@@ -342,8 +343,8 @@ export function ruleHasVariants(id) { return Boolean(database.prepare('SELECT 1 
 export function addRule(input,userId) {
   database.exec('BEGIN IMMEDIATE');
   try {
-    const result=database.prepare(`INSERT INTO rules (title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id,example_url)
-      VALUES (?,?,?,?,?,?,?,?)`).run(input.titleZh,input.titleEn,JSON.stringify(input.rulesZh),JSON.stringify(input.rulesEn),input.category,input.isVariant?1:0,input.baseRuleId,input.exampleUrl);
+    const result=database.prepare(`INSERT INTO rules (title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id,example_url,example_author)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(input.titleZh,input.titleEn,JSON.stringify(input.rulesZh),JSON.stringify(input.rulesEn),input.category,input.isVariant?1:0,input.baseRuleId,input.exampleUrl,input.exampleAuthor??'');
     const id=Number(result.lastInsertRowid);
     const save=database.prepare(`INSERT INTO rule_item_revisions(rule_id,item,revision,content_json,changed_by_user_id)
       VALUES (?,?,1,?,?)`);
@@ -364,9 +365,9 @@ export function updateRule(id,input,userId,expectedRevisions) {
     const nextRevisions={...current.revisions};
     for (const item of changedItems) nextRevisions[item]+=1;
     const changed=changedItems.length>0||current.category!==next.category;
-    database.prepare(`UPDATE rules SET title_zh=?,title_en=?,rules_zh=?,rules_en=?,category=?,is_variant=?,base_rule_id=?,example_url=?,
+    database.prepare(`UPDATE rules SET title_zh=?,title_en=?,rules_zh=?,rules_en=?,category=?,is_variant=?,base_rule_id=?,example_url=?,example_author=?,
       name_revision=?,description_revision=?,example_revision=?,edit_version=? WHERE id=?`)
-      .run(next.titleZh,next.titleEn,JSON.stringify(next.rulesZh),JSON.stringify(next.rulesEn),next.category,next.isVariant?1:0,next.baseRuleId,next.exampleUrl,
+      .run(next.titleZh,next.titleEn,JSON.stringify(next.rulesZh),JSON.stringify(next.rulesEn),next.category,next.isVariant?1:0,next.baseRuleId,next.exampleUrl,next.exampleAuthor??'',
         nextRevisions.name,nextRevisions.description,nextRevisions.example,current.editVersion+(changed?1:0),id);
     const save=database.prepare(`INSERT INTO rule_item_revisions(rule_id,item,revision,content_json,changed_by_user_id)
       VALUES (?,?,?,?,?)`);

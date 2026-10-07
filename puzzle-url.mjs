@@ -57,11 +57,13 @@ export function hasConcretePuzzlePayload(value) {
   const source = getPuzzleSource(url.href);
   const pathname = url.pathname.toLowerCase();
   const hasQuery = url.search.length > 1;
+  const hashParams = source === 'penpa+' ? new URLSearchParams(url.hash.slice(1)) : null;
+  const hasPenpaHashPayload = hashParams && ['edit', 'solve'].includes(hashParams.get('m')) && Boolean(hashParams.get('p')?.trim());
   if (source === 'puzz.link') return pathname === '/p' && hasQuery;
   if (source === 'pzv3') return pathname === '/p.html' && hasQuery;
   if (source === 'pzprxs') return pathname === '/p' && hasQuery;
   if (source === 'pzplus') return pathname === '/p.html' && hasQuery;
-  return hasQuery || (pathname !== '/' && pathname !== '/penpa-edit/' && pathname !== '/pedit-v2/');
+  return hasQuery || Boolean(hasPenpaHashPayload) || (pathname !== '/' && pathname !== '/penpa-edit/' && pathname !== '/pedit-v2/');
 }
 
 export function isConcretePenpaPuzzleUrl(value) {

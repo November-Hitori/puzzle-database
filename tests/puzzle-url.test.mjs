@@ -37,6 +37,13 @@ test('detects concrete puzzle payloads for iframe rendering', () => {
 test('accepts only concrete supported Penpa examples without credentials or non-default ports',()=>{
   assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com/?m=edit&p=example'),true);
   assert.equal(isConcretePenpaPuzzleUrl('https://opt-pan.github.io/penpa-edit/?m=edit&p=example'),true);
+  assert.equal(isConcretePenpaPuzzleUrl('https://swaroopg92.github.io/penpa-edit/#m=edit&p=encodedPuzzleData'),true);
+  assert.equal(isConcretePenpaPuzzleUrl('https://swaroopg92.github.io/penpa-edit/#m=solve&p=encodedPuzzleData'),true);
+  assert.equal(isConcretePenpaPuzzleUrl('https://swaroopg92.github.io/penpa-edit/#m=edit&p=%20'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://swaroopg92.github.io/penpa-edit/#section'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com.evil.example/penpa-edit/#m=edit&p=encodedPuzzleData'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://user:pass@swaroopg92.github.io/penpa-edit/#m=edit&p=data'),false);
+  assert.equal(isConcretePenpaPuzzleUrl('https://swaroopg92.github.io:8443/penpa-edit/#m=edit&p=data'),false);
   assert.equal(isConcretePenpaPuzzleUrl(''),false);
   assert.equal(isConcretePenpaPuzzleUrl('javascript:alert(1)'),false);
   assert.equal(isConcretePenpaPuzzleUrl('https://penpa-edit.com/'),false);

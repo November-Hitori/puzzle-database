@@ -21,6 +21,8 @@ legacy.exec(`CREATE TABLE trusted_users (id TEXT PRIMARY KEY,name TEXT NOT NULL,
 CREATE TABLE member_sessions (token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires_at INTEGER NOT NULL);`);
 legacy.exec(`CREATE TABLE rules (id INTEGER PRIMARY KEY,title_zh TEXT NOT NULL,title_en TEXT NOT NULL,rules_zh TEXT NOT NULL,rules_en TEXT NOT NULL,category TEXT NOT NULL,is_variant INTEGER NOT NULL,base_rule_id INTEGER REFERENCES rules(id));
 INSERT INTO rules(id,title_zh,title_en,rules_zh,rules_en,category,is_variant) VALUES(42,'Legacy rule','Legacy rule','["旧中文说明"]','["Old English description"]','其它',0);`);
+legacy.exec(`CREATE TABLE rule_item_revisions (rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,content_json TEXT NOT NULL,changed_by_user_id TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(rule_id,item,revision));
+INSERT INTO rule_item_revisions(rule_id,item,revision,content_json) VALUES(42,'example',1,'{"exampleUrl":""}');`);
 const sha256=(value)=>createHash('sha256').update(value).digest('hex');
 legacy.prepare('INSERT INTO trusted_users(id,name,access_code_hash) VALUES (?,?,?)').run('trusted-1','Old Ada',sha256('stale-ada-code-before-rotation'));
 legacy.prepare('INSERT INTO trusted_users(id,name,access_code_hash) VALUES (?,?,?)').run('removed-user','Removed Member',sha256('removed-member-invite'));
@@ -40,7 +42,8 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(legacyRule.exampleUrl,'');
   assert.deepEqual(legacyRule.revisions,{name:1,description:1,example:1});
   assert.ok(legacyRule.quality.errors.some((error)=>error.code==='missingExample'));
-  assert.deepEqual(legacyRule.quality.groups.example.revisions[0].content,{exampleUrl:''});
+  assert.deepEqual(legacyRule.quality.groups.example.revisions[0].content,{exampleUrl:'',exampleAuthor:''});
+  assert.equal(database.prepare("SELECT content_json FROM rule_item_revisions WHERE rule_id=42 AND item='example' AND revision=1").get().content_json,'{"exampleUrl":""}');
   assert.equal(database.prepare('SELECT is_active FROM trusted_users WHERE id=?').get('removed-user').is_active,0);
   assert.equal(database.prepare('SELECT pending_legacy_user_id FROM registration_gate WHERE id=1').get().pending_legacy_user_id,'trusted-1');
   assert.equal(bootstrapLegacyAuth([{id:'trusted-1',name:'Ada',accessCodeHash:sha256(members[0].accessCode)}]),false);
@@ -60,6 +63,8 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal((await request('/api/puzzles')).response.status,401);
   assert.equal((await request('/data/trusted-users.json')).response.status,404);
   assert.equal((await request('/db.mjs')).response.status,404);
+  assert.equal((await request('/scripts/import-rules.mjs')).response.status,404);
+  assert.equal((await request('/tools/prepare-rule-import.py')).response.status,404);
 
   const rotatedCode=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:'stale-ada-code-before-rotation',username:'Ada',password:'correct horse battery staple'})});
   assert.equal(rotatedCode.response.status,400);
@@ -209,6 +214,10 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
     const invalid=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'名称',category:'其它',exampleUrl})},owner);
     assert.equal(invalid.response.status,400,exampleUrl);
   }
+  const oversizedExampleAuthor=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'作者名长度校验',category:'其它',exampleAuthor:'a'.repeat(201)})},owner);
+  assert.equal(oversizedExampleAuthor.response.status,400);
+  const overlongExampleUrl=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'例题链接长度校验',category:'其它',exampleUrl:`https://swaroopg92.github.io/penpa-edit/#m=edit&p=${'x'.repeat(4100)}`})},owner);
+  assert.equal(overlongExampleUrl.response.status,400);
   const draft=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'中文规则名',rulesZh:['中文草稿说明'],rulesEn:[],category:'其它'})},owner);
   assert.equal(draft.response.status,201);
   assert.deepEqual(new Set(draft.body.rule.quality.errors.map((error)=>error.code)),new Set(['missingEnName','missingEnDescription','missingExample']));
@@ -222,8 +231,10 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
   assert.equal(draftReject.body.rule.quality.groups.name.rejectionSuggestion,'');
   assert.ok(draftReject.body.rule.quality.errors.some((error)=>error.code==='auditRejected'&&error.item==='name'));
 
-  const complete=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'规则名称',titleEn:'Rule name',rulesZh:['中文规则说明'],rulesEn:['English rule description','second independent clause'],exampleUrl:'https://penpa-edit.com/?m=edit&p=example',category:'其它'})},owner);
+  const longPenpaExampleUrl=`https://swaroopg92.github.io/penpa-edit/#m=edit&p=${'x'.repeat(3300)}`;
+  const complete=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'规则名称',titleEn:'Rule name',rulesZh:['中文规则说明'],rulesEn:['English rule description','second independent clause'],exampleUrl:longPenpaExampleUrl,exampleAuthor:'Puzzle author',category:'其它'})},owner);
   assert.equal(complete.response.status,201);
+  assert.equal(complete.body.rule.exampleUrl,longPenpaExampleUrl);
   const id=complete.body.rule.id;
   assert.deepEqual(complete.body.rule.revisions,{name:1,description:1,example:1});
   assert.equal(complete.body.rule.editVersion,1);
@@ -265,23 +276,34 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
   assert.deepEqual(fullyApproved.body.rule.quality.warnings,[]);
   assert.equal(fullyApproved.body.rule.quality.groups.description.approvalCount,3);
   assert.equal(fullyApproved.body.rule.quality.groups.example.approvalCount,3);
+  assert.equal(fullyApproved.body.rule.exampleAuthor,'Puzzle author');
+  const authorEdit=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({exampleAuthor:'Another puzzle author',expectedEditVersion:fullyApproved.body.rule.editVersion,expectedRevisions:fullyApproved.body.rule.revisions})},owner);
+  assert.equal(authorEdit.response.status,200);
+  assert.deepEqual(authorEdit.body.rule.revisions,{name:2,description:1,example:2});
+  assert.equal(authorEdit.body.rule.exampleUrl,fullyApproved.body.rule.exampleUrl);
+  assert.equal(authorEdit.body.rule.quality.groups.example.status,'pending');
+  assert.equal(authorEdit.body.rule.quality.groups.name.status,'approved');
+  assert.equal(authorEdit.body.rule.quality.groups.description.status,'approved');
+  assert.deepEqual(authorEdit.body.rule.quality.groups.example.revisions[1].content,{exampleUrl:fullyApproved.body.rule.exampleUrl,exampleAuthor:'Another puzzle author'});
   const categoryEdit=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({category:'填数',expectedEditVersion:fullyApproved.body.rule.editVersion,expectedRevisions:fullyApproved.body.rule.revisions})},owner);
-  assert.equal(categoryEdit.response.status,200);
-  assert.deepEqual(categoryEdit.body.rule.revisions,fullyApproved.body.rule.revisions);
-  assert.equal(categoryEdit.body.rule.editVersion,fullyApproved.body.rule.editVersion+1);
-  assert.equal(categoryEdit.body.rule.quality.groups.description.status,'approved');
-  const staleCategory=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({category:'路径',expectedEditVersion:fullyApproved.body.rule.editVersion,expectedRevisions:fullyApproved.body.rule.revisions})},owner);
+  assert.equal(categoryEdit.response.status,409);
+  const categoryAfterAuthor=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({category:'填数',expectedEditVersion:authorEdit.body.rule.editVersion,expectedRevisions:authorEdit.body.rule.revisions})},owner);
+  assert.equal(categoryAfterAuthor.response.status,200);
+  assert.deepEqual(categoryAfterAuthor.body.rule.revisions,authorEdit.body.rule.revisions);
+  assert.equal(categoryAfterAuthor.body.rule.editVersion,authorEdit.body.rule.editVersion+1);
+  assert.equal(categoryAfterAuthor.body.rule.quality.groups.description.status,'approved');
+  const staleCategory=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({category:'路径',expectedEditVersion:authorEdit.body.rule.editVersion,expectedRevisions:authorEdit.body.rule.revisions})},owner);
   assert.equal(staleCategory.response.status,409);
-  const exampleEdit=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({exampleUrl:'https://penpa-edit.com/?m=edit&p=updated',expectedEditVersion:categoryEdit.body.rule.editVersion,expectedRevisions:categoryEdit.body.rule.revisions})},owner);
+  const exampleEdit=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({exampleUrl:'https://penpa-edit.com/?m=edit&p=updated',expectedEditVersion:categoryAfterAuthor.body.rule.editVersion,expectedRevisions:categoryAfterAuthor.body.rule.revisions})},owner);
   assert.equal(exampleEdit.response.status,200);
-  assert.deepEqual(exampleEdit.body.rule.revisions,{name:2,description:1,example:2});
+  assert.deepEqual(exampleEdit.body.rule.revisions,{name:2,description:1,example:3});
   assert.equal(exampleEdit.body.rule.quality.groups.example.status,'pending');
   assert.equal(exampleEdit.body.rule.quality.groups.example.history.length,3);
   assert.equal(exampleEdit.body.rule.quality.groups.name.status,'approved');
   assert.equal(exampleEdit.body.rule.quality.groups.description.status,'approved');
   const clearExample=await request(`/api/rules/${id}`,{method:'PATCH',body:JSON.stringify({exampleUrl:null,expectedEditVersion:exampleEdit.body.rule.editVersion,expectedRevisions:exampleEdit.body.rule.revisions})},owner);
   assert.equal(clearExample.response.status,200);
-  assert.deepEqual(clearExample.body.rule.revisions,{name:2,description:1,example:3});
+  assert.deepEqual(clearExample.body.rule.revisions,{name:2,description:1,example:4});
   assert.equal(clearExample.body.rule.exampleUrl,'');
   assert.equal(clearExample.body.rule.quality.groups.example.status,'incomplete');
   assert.ok(clearExample.body.rule.quality.errors.some((error)=>error.code==='missingExample'));
