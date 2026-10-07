@@ -405,7 +405,7 @@ function openCalendarReentry(puzzle) {
       await apiRequest(`/api/calendar/puzzles/${encodeURIComponent(target.number)}/reenter`, { method: 'POST', body: JSON.stringify({ expectedReviewRound: target.reviewRound }) });
       if (!isCurrentUserSession(requestEpoch, userId)) return;
       await refreshCalendarData(requestEpoch, userId); if (!isCurrentUserSession(requestEpoch, userId)) return;
-      const mayClose = errorNode.isConnected; if (mayClose) closeModal(); state.calendarReturnRoute = 'calendar'; window.location.hash = `#calendar-puzzle-${target.number}`; if (mayClose) showToast(`「${target.title}」已进入新一轮`);
+      const mayClose = errorNode.isConnected; if (mayClose) closeModal(); state.calendarReturnRoute = 'calendar'; const detailHash = `#calendar-puzzle-${target.number}`; if (window.location.hash === detailHash) renderRoute(); else window.location.hash = detailHash; if (mayClose) showToast(`「${target.title}」已进入新一轮`);
     } catch (error) {
       if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return;
       if (error.status === 409) { try { await refreshCalendarData(requestEpoch, userId); } catch {} if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return; errorNode.textContent = '轮次已被其他成员更新，列表已刷新。请取消后重新打开确认框。'; confirm.disabled = true; confirm.textContent = '轮次已更新'; }
