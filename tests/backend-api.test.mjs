@@ -33,11 +33,25 @@ process.env.PUZARCHIVE_USERS_PATH=usersPath;
 const {createServer}=await import('../server.mjs');
 const {authBootstrapComplete,bootstrapLegacyAuth,database,findSession,getRule,setRegistrationGate}=await import('../db.mjs');
 
+test('fresh database seed assigns unique delete tokens before puzzle seeding',()=>{
+  const isolated=fs.mkdtempSync(path.join(os.tmpdir(),'puzarchive-fresh-db-'));
+  try {
+    const freshPath=path.join(isolated,'fresh.sqlite');
+    const moduleUrl=new URL('../db.mjs',import.meta.url).href;
+    const child=spawnSync(process.execPath,['--input-type=module','-e',`import {database} from ${JSON.stringify(moduleUrl)}; const p=database.prepare('SELECT COUNT(*) AS count,COUNT(DISTINCT delete_token) AS uniqueTokens,MIN(LENGTH(delete_token)) AS minLength FROM puzzles').get(); const r=database.prepare('SELECT COUNT(*) AS count,COUNT(DISTINCT delete_token) AS uniqueTokens,MIN(LENGTH(delete_token)) AS minLength FROM rules').get(); console.log(JSON.stringify({puzzles:p,rules:r})); database.close();`],{encoding:'utf8',env:{...process.env,PUZARCHIVE_DB_PATH:freshPath,PUZARCHIVE_USERS_PATH:path.join(isolated,'trusted-users.json')}});
+    assert.equal(child.status,0,`${child.stderr}\n${child.stdout}`);
+    const result=JSON.parse(child.stdout.trim().split('\n').at(-1));
+    assert.deepEqual(result.puzzles,{count:8,uniqueTokens:8,minLength:36});
+    assert.deepEqual(result.rules,{count:0,uniqueTokens:0,minLength:null});
+  } finally { fs.rmSync(isolated,{recursive:true,force:true}); }
+});
+
 test('one-time invite migration preserves identities, invalidates old sessions, and supports username-password accounts',async(t)=>{
   assert.equal(authBootstrapComplete(),true);
   assert.equal(findSession(sha256('old-invitation-session')),null);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM puzzles WHERE number=777').get().count,1);
   const legacyRule=getRule(42);
+  assert.ok(legacyRule.deleteToken);
   assert.equal(legacyRule.titleZh,'Legacy rule');
   assert.equal(legacyRule.exampleUrl,'');
   assert.deepEqual(legacyRule.revisions,{name:1,description:1,example:1});
@@ -46,6 +60,7 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(database.prepare("SELECT content_json FROM rule_item_revisions WHERE rule_id=42 AND item='example' AND revision=1").get().content_json,'{"exampleUrl":""}');
   assert.equal(database.prepare('SELECT is_active FROM trusted_users WHERE id=?').get('removed-user').is_active,0);
   assert.equal(database.prepare('SELECT pending_legacy_user_id FROM registration_gate WHERE id=1').get().pending_legacy_user_id,'trusted-1');
+  assert.ok(database.prepare('SELECT delete_token FROM puzzles WHERE number=777').get().delete_token);
   assert.equal(bootstrapLegacyAuth([{id:'trusted-1',name:'Ada',accessCodeHash:sha256(members[0].accessCode)}]),false);
 
   const server=createServer();
@@ -107,6 +122,7 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(draftRule.response.status,201);
   assert.ok(draftRule.body.rule.quality.errors.some((error)=>error.code==='missingEnName'));
   assert.ok(draftRule.body.rule.quality.errors.some((error)=>error.code==='missingZhDescription'));
+  assert.ok(!draftRule.body.rule.quality.errors.some((error)=>error.code==='missingEnDescription'));
 
   const invalidDate=await request('/api/calendar/puzzles',{method:'POST',body:JSON.stringify({title:'Calendar',author:'Ada',source:'Fill-in',inputMode:'blank',ruleId:original.body.rule.id,suggestedDate:'2025-02-29'})},ada);
   assert.equal(invalidDate.response.status,400);
@@ -114,9 +130,14 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(created.response.status,201);
   const number=created.body.puzzle.number;
   assert.equal(created.body.puzzle.scope,'calendar');
+  assert.ok(created.body.puzzle.deleteToken);
   assert.equal(created.body.puzzle.rule.titleEn,'Fillomino');
   assert.deepEqual(created.body.puzzle.submittedBy,{id:'trusted-1',name:'Ada'});
   assert.equal(created.body.puzzle.suggestedDate,'2024-02-29');
+  const referencedRuleDelete=await request(`/api/rules/${original.body.rule.id}`,{method:'DELETE',body:JSON.stringify({deleteToken:original.body.rule.deleteToken,expectedEditVersion:original.body.rule.editVersion})},ada);
+  assert.equal(referencedRuleDelete.response.status,409);
+  assert.equal(referencedRuleDelete.body.reason,'referenced');
+  assert.deepEqual(referencedRuleDelete.body.references,{publicPuzzles:0,calendarPuzzles:1,otherPuzzles:0,totalPuzzles:1,variants:1});
   const legacyList=await request('/api/puzzles',{},ada);
   assert.deepEqual(legacyList.body.puzzles.map((p)=>p.number),[777]);
   assert.equal((await request('/api/tags',{},ada)).body.tags.length,0);
@@ -149,6 +170,42 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(adaCalendar.body.puzzles[0].completed,false);
   assert.equal(adaCalendar.body.puzzles[0].userRating,null);
   assert.equal((await request(`/api/calendar/puzzles/${number}`,{method:'PATCH',body:JSON.stringify({suggestedDate:null})},ada)).response.status,200);
+  assert.equal((await request(`/api/calendar/puzzles/${number}`,{method:'DELETE',body:JSON.stringify({deleteToken:created.body.puzzle.deleteToken})})).response.status,401);
+  const tagged=await request(`/api/calendar/puzzles/${number}/tags`,{method:'POST',body:JSON.stringify({tag:'delete-cleanup'})},lin);
+  assert.equal(tagged.response.status,200);
+  const puzzleId=database.prepare("SELECT id FROM puzzles WHERE number=? AND scope='calendar'").get(number).id;
+  database.prepare('INSERT INTO collection_puzzles(collection_id,puzzle_id,position) VALUES((SELECT id FROM collections ORDER BY id LIMIT 1),?,99)').run(puzzleId);
+  const deniedDelete=await request(`/api/calendar/puzzles/${number}`,{method:'DELETE',body:JSON.stringify({deleteToken:created.body.puzzle.deleteToken})},lin);
+  assert.equal(deniedDelete.response.status,403);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM puzzles WHERE id=?').get(puzzleId).count,1);
+  const deleted=await request(`/api/calendar/puzzles/${number}`,{method:'DELETE',body:JSON.stringify({deleteToken:created.body.puzzle.deleteToken})},ada);
+  assert.equal(deleted.response.status,200);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM puzzles WHERE id=?').get(puzzleId).count,0);
+  for (const table of ['puzzle_ratings','puzzle_completions','puzzle_tags','collection_puzzles']) assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE puzzle_id=?`).get(puzzleId).count,0,table);
+  const replacement=await request('/api/calendar/puzzles',{method:'POST',body:JSON.stringify({title:'Replacement calendar puzzle',author:'Ada',source:'Fill-in',inputMode:'blank',ruleId:original.body.rule.id,suggestedDate:null})},ada);
+  assert.equal(replacement.response.status,201);
+  assert.ok(replacement.body.puzzle.number>number);
+  assert.notEqual(replacement.body.puzzle.deleteToken,created.body.puzzle.deleteToken);
+  const stalePuzzleDelete=await request(`/api/calendar/puzzles/${number}`,{method:'DELETE',body:JSON.stringify({deleteToken:created.body.puzzle.deleteToken})},ada);
+  assert.equal(stalePuzzleDelete.response.status,404);
+  assert.equal((await request(`/api/calendar/puzzles/${number}/complete-rating`,{method:'POST',body:JSON.stringify({logic:1,intuition:1,enjoyment:1})},ada)).response.status,404);
+  assert.equal((await request(`/api/calendar/puzzles/${number}`,{method:'PATCH',body:JSON.stringify({suggestedDate:'2026-01-01'})},ada)).response.status,404);
+  assert.equal((await request(`/api/calendar/puzzles/${replacement.body.puzzle.number}`,{method:'DELETE',body:JSON.stringify({deleteToken:replacement.body.puzzle.deleteToken})},ada)).response.status,200);
+  const publicReference=await request('/api/puzzles',{method:'POST',body:JSON.stringify({title:'Legacy public reference',author:'Ada',source:'fixture',inputMode:'blank',ruleId:original.body.rule.id,answer:'x'})},ada);
+  assert.equal(publicReference.response.status,201);
+  const publicReferenceDelete=await request(`/api/rules/${original.body.rule.id}`,{method:'DELETE',body:JSON.stringify({deleteToken:original.body.rule.deleteToken,expectedEditVersion:original.body.rule.editVersion})},ada);
+  assert.equal(publicReferenceDelete.response.status,409);
+  assert.deepEqual(publicReferenceDelete.body.references,{publicPuzzles:1,calendarPuzzles:0,otherPuzzles:0,totalPuzzles:1,variants:1});
+  const futureScopeRule=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'未知范围引用',rulesZh:['中文规则'],category:'其它'})},ada);
+  assert.equal(futureScopeRule.response.status,201);
+  database.prepare(`INSERT INTO puzzles(number,title,type,author,source,scope,rule_id,delete_token)
+    VALUES((SELECT COALESCE(MAX(number),0)+1 FROM puzzles),'Future scope reference','其它','Fixture','fixture','future-scope',?,?)`).run(futureScopeRule.body.rule.id,'future-scope-delete-token');
+  const insertedFuture=database.prepare("SELECT id,number FROM puzzles WHERE title='Future scope reference'").get();
+  database.prepare("UPDATE entity_id_sequences SET next_id=MAX(next_id,?) WHERE name='puzzles'").run(insertedFuture.id+1);
+  database.prepare("UPDATE entity_id_sequences SET next_id=MAX(next_id,?) WHERE name='puzzle-numbers'").run(insertedFuture.number+1);
+  const futureScopeDelete=await request(`/api/rules/${futureScopeRule.body.rule.id}`,{method:'DELETE',body:JSON.stringify({deleteToken:futureScopeRule.body.rule.deleteToken,expectedEditVersion:futureScopeRule.body.rule.editVersion})},ada);
+  assert.equal(futureScopeDelete.response.status,409);
+  assert.deepEqual(futureScopeDelete.body.references,{publicPuzzles:0,calendarPuzzles:0,otherPuzzles:1,totalPuzzles:1,variants:0});
   assert.equal((await request('/api/collections',{},ada)).body.collections.length,2);
   const unauthLogout=await request('/api/session',{method:'DELETE'});
   assert.equal(unauthLogout.response.status,200);
@@ -220,7 +277,7 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
   assert.equal(overlongExampleUrl.response.status,400);
   const draft=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'中文规则名',rulesZh:['中文草稿说明'],rulesEn:[],category:'其它'})},owner);
   assert.equal(draft.response.status,201);
-  assert.deepEqual(new Set(draft.body.rule.quality.errors.map((error)=>error.code)),new Set(['missingEnName','missingEnDescription','missingExample']));
+  assert.deepEqual(new Set(draft.body.rule.quality.errors.map((error)=>error.code)),new Set(['missingEnName','missingExample']));
   assert.equal(draft.body.rule.quality.groups.name.status,'incomplete');
   assert.deepEqual(new Set(draft.body.rule.quality.warnings.map((warning)=>warning.item)),new Set(['name','description','example']));
   const draftApprove=await request(`/api/rules/${draft.body.rule.id}/audits`,{method:'POST',body:JSON.stringify({item:'name',decision:'approve',revision:1})},reviewers[1].cookie);
@@ -323,6 +380,44 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
   const changedVariantBase=await request(`/api/rules/${dependent.body.rule.id}`,{method:'PATCH',body:JSON.stringify({baseRuleId:42,expectedEditVersion:dependent.body.rule.editVersion,expectedRevisions:dependent.body.rule.revisions})},owner);
   assert.equal(changedVariantBase.response.status,200);
   assert.deepEqual(changedVariantBase.body.rule.revisions,{name:1,description:2,example:1});
+
+  const optionalEnglish=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'英文说明可选',titleEn:'English optional',rulesZh:['中文说明'],rulesEn:[],exampleUrl:'https://penpa-edit.com/?m=edit&p=english-optional',category:'其它'})},owner);
+  assert.equal(optionalEnglish.response.status,201);
+  assert.ok(!optionalEnglish.body.rule.quality.errors.some((error)=>error.code==='missingEnDescription'));
+  assert.ok(optionalEnglish.body.rule.quality.warnings.some((warning)=>warning.item==='description'));
+  for (const account of reviewers.slice(0,3)) {
+    const reviewed=await request(`/api/rules/${optionalEnglish.body.rule.id}/audits`,{method:'POST',body:JSON.stringify({item:'description',decision:'approve',revision:1})},account.cookie);
+    assert.equal(reviewed.response.status,200);
+  }
+  const approvedWithoutEnglish=await request(`/api/rules/${optionalEnglish.body.rule.id}`,{},owner);
+  assert.equal(approvedWithoutEnglish.body.rule.quality.groups.description.status,'approved');
+  assert.ok(!approvedWithoutEnglish.body.rule.quality.warnings.some((warning)=>warning.item==='description'));
+  const englishAdded=await request(`/api/rules/${optionalEnglish.body.rule.id}`,{method:'PATCH',body:JSON.stringify({rulesEn:['English translation'],expectedEditVersion:approvedWithoutEnglish.body.rule.editVersion,expectedRevisions:approvedWithoutEnglish.body.rule.revisions})},owner);
+  assert.equal(englishAdded.response.status,200);
+  assert.equal(englishAdded.body.rule.revisions.description,2);
+  assert.equal(englishAdded.body.rule.quality.groups.description.status,'pending');
+  const optionalId=optionalEnglish.body.rule.id, optionalToken=optionalEnglish.body.rule.deleteToken;
+  assert.ok(optionalToken);
+  const anonymousDelete=await request(`/api/rules/${optionalId}`,{method:'DELETE',body:JSON.stringify({deleteToken:optionalToken,expectedEditVersion:englishAdded.body.rule.editVersion})});
+  assert.equal(anonymousDelete.response.status,401);
+  const csrfDelete=await fetch(`${base}/api/rules/${optionalId}`,{method:'DELETE',headers:{host:`127.0.0.1:${server.address().port}`,'content-type':'application/json',cookie:owner},body:JSON.stringify({deleteToken:optionalToken,expectedEditVersion:englishAdded.body.rule.editVersion})});
+  assert.equal(csrfDelete.status,403);
+  const staleDelete=await request(`/api/rules/${optionalId}`,{method:'DELETE',body:JSON.stringify({deleteToken:optionalToken,expectedEditVersion:englishAdded.body.rule.editVersion+1})},owner);
+  assert.equal(staleDelete.response.status,409);
+  assert.equal(staleDelete.body.reason,'stale');
+  const deletedOptional=await request(`/api/rules/${optionalId}`,{method:'DELETE',body:JSON.stringify({deleteToken:optionalToken,expectedEditVersion:englishAdded.body.rule.editVersion})},owner);
+  assert.equal(deletedOptional.response.status,200);
+  for (const table of ['rules','rule_item_revisions','rule_item_votes','rule_item_audit_events']) assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${table==='rules'?'id':'rule_id'}=?`).get(optionalId).count,0,table);
+  const replacementRule=await request('/api/rules',{method:'POST',body:JSON.stringify({titleZh:'复用编号替代规则',rulesZh:['有效说明'],category:'其它'})},owner);
+  assert.equal(replacementRule.response.status,201);
+  assert.ok(replacementRule.body.rule.id>optionalId);
+  assert.notEqual(replacementRule.body.rule.deleteToken,optionalToken);
+  const staleRuleDelete=await request(`/api/rules/${optionalId}`,{method:'DELETE',body:JSON.stringify({deleteToken:optionalToken,expectedEditVersion:englishAdded.body.rule.editVersion})},owner);
+  assert.equal(staleRuleDelete.response.status,404);
+  assert.equal((await request(`/api/rules/${optionalId}`,{},owner)).response.status,404);
+  assert.equal((await request(`/api/rules/${optionalId}`,{method:'PATCH',body:JSON.stringify({titleZh:'stale',expectedEditVersion:englishAdded.body.rule.editVersion,expectedRevisions:englishAdded.body.rule.revisions})},owner)).response.status,404);
+  assert.equal((await request(`/api/rules/${optionalId}/audits`,{method:'POST',body:JSON.stringify({item:'name',decision:'approve',revision:1})},owner)).response.status,404);
+  assert.equal((await request(`/api/rules/${replacementRule.body.rule.id}`,{method:'DELETE',body:JSON.stringify({deleteToken:replacementRule.body.rule.deleteToken,expectedEditVersion:replacementRule.body.rule.editVersion})},owner)).response.status,200);
 });
 
 test('forwarded headers are ignored by default and accepted only in trusted loopback proxy mode',async(t)=>{

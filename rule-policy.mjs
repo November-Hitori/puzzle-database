@@ -9,8 +9,7 @@ export function getRuleFieldErrors(rule) {
   if (!String(rule.titleZh||'').trim()) errors.push({code:'missingZhName',item:'name',message:'缺少中文名称'});
   if (!String(rule.titleEn||'').trim()) errors.push({code:'missingEnName',item:'name',message:'缺少英文名称'});
   if (!Array.isArray(rule.rulesZh)||!rule.rulesZh.some((clause)=>String(clause).trim())) errors.push({code:'missingZhDescription',item:'description',message:'缺少中文说明'});
-  if (!Array.isArray(rule.rulesEn)||!rule.rulesEn.some((clause)=>String(clause).trim())) errors.push({code:'missingEnDescription',item:'description',message:'缺少英文说明'});
-  if (rule.isVariant && !rule.baseRuleId) errors.push({code:'missingVariantBase',item:'description',message:'变体缺少基础规则'});
+  if (rule.isVariant && (!rule.baseRuleId || rule.baseRuleValid === false)) errors.push({code:'missingVariantBase',item:'description',message:'变体缺少有效的基础规则'});
   if (!String(rule.exampleUrl||'').trim()) errors.push({code:'missingExample',item:'example',message:'缺少例题链接'});
   return errors;
 }

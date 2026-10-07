@@ -8,7 +8,8 @@ import {
   addCalendarPuzzle, addFolder, addPuzzle, addPuzzleTag, addRule, calendarPuzzleExists,
   authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
-  getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate, updateRule
+  getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
+  updateRule, deleteRule, deleteCalendarPuzzle
 } from './db.mjs';
 import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
 import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
@@ -233,7 +234,19 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='POST' && pathname==='/api/rules') {
     const input=await readJson(request), normalized=normalizeRuleInput(input);
     if (normalized.error) return sendJson(response,400,{error:normalized.error});
-    const rule=addRule(normalized.value,user.id); return sendJson(response,201,{rule,rules:getRules(user.id)});
+    const rule=addRule(normalized.value,user.id);
+    if (rule.error==='invalid-base') return sendJson(response,409,{error:'variant base changed; reload before creating the rule'});
+    return sendJson(response,201,{rule,rules:getRules(user.id)});
+  }
+  if (request.method==='DELETE'&&ruleMatch) {
+    const id=Number(ruleMatch[1]),input=await readJson(request);
+    if (!Number.isSafeInteger(id)||id<1) return sendJson(response,404,{error:'rule not found'});
+    if (typeof input.deleteToken!=='string'||!input.deleteToken||!Number.isInteger(input.expectedEditVersion)||input.expectedEditVersion<1) return sendJson(response,400,{error:'deleteToken and expectedEditVersion are required'});
+    const result=deleteRule(id,input.deleteToken,input.expectedEditVersion);
+    if (result.error==='missing') return sendJson(response,404,{error:'rule not found'});
+    if (result.error==='referenced') return sendJson(response,409,{error:'rule is still in use',reason:'referenced',references:result.references});
+    if (result.error) return sendJson(response,409,{error:'rule changed; reload before deleting',reason:'stale'});
+    return sendJson(response,200,{rules:getRules(user.id)});
   }
   if (request.method==='PATCH'&&ruleMatch) {
     const id=Number(ruleMatch[1]),input=await readJson(request),previous=getRule(id,user.id);
@@ -246,6 +259,8 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (normalized.error) return sendJson(response,400,{error:normalized.error});
     const result=updateRule(id,normalized.value,user.id,expected);
     if (result.error==='missing') return sendJson(response,404,{error:'rule not found'});
+    if (result.error==='invalid-base') return sendJson(response,409,{error:'variant base changed; reload before editing'});
+    if (result.error==='has-variants') return sendJson(response,409,{error:'a rule used as another variant base cannot become a variant'});
     if (result.error) return sendJson(response,409,{error:'rule revisions changed; reload before editing'});
     return sendJson(response,200,{rule:result.rule,rules:getRules(user.id)});
   }
@@ -272,7 +287,9 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (input.inputMode==='external' && !parseTrustedPuzzleUrl(input.url)) return sendJson(response,400,{error:'only supported puzzle tool URLs are allowed'});
     if (!validDate(input.suggestedDate)) return sendJson(response,400,{error:'suggestedDate must be a real YYYY-MM-DD date or null'});
     if (input.inputMode==='blank' && !validText(input.answer||'',2000)) return sendJson(response,400,{error:'invalid answer'});
-    const created=addCalendarPuzzle(input,user), puzzles=getCalendarPuzzles(user.id);
+    const created=addCalendarPuzzle(input,user);
+    if (created.error==='missing-rule') return sendJson(response,409,{error:'rule is no longer available; reload before submitting'});
+    const puzzles=getCalendarPuzzles(user.id);
     return sendJson(response,201,{...created,puzzles});
   }
   const calendarRating=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/complete-rating$/);
@@ -295,6 +312,17 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (result.forbidden) return sendJson(response,403,{error:'only the uploader may change suggestedDate'});
     return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
   }
+  if (request.method==='DELETE' && calendarMatch) {
+    const number=Number(calendarMatch[1]);
+    if (!Number.isSafeInteger(number)||number<1) return sendJson(response,404,{error:'puzzle not found'});
+    const input=await readJson(request);
+    if (typeof input.deleteToken!=='string'||!input.deleteToken) return sendJson(response,400,{error:'deleteToken is required'});
+    const result=deleteCalendarPuzzle(number,user.id,input.deleteToken);
+    if (result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
+    if (result.error==='forbidden') return sendJson(response,403,{error:'only the uploader may delete this puzzle'});
+    if (result.error) return sendJson(response,409,{error:'puzzle changed; reload before deleting',reason:'stale'});
+    return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
+  }
 
   if (request.method==='POST' && pathname==='/api/puzzles') {
     const input=await readJson(request);
@@ -303,7 +331,9 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (input.inputMode==='external' && !parseTrustedPuzzleUrl(input.url)) return sendJson(response,400,{error:'only supported puzzle tool URLs are allowed'});
     const rule=getRule(Number(input.ruleId));
     input.type=rule.category; input.rules=rule.rulesZh.join('\n');
-    const id=addPuzzle(input); return sendJson(response,201,{id,puzzles:getPuzzles(user.id)});
+    const id=addPuzzle(input);
+    if (id?.error==='missing-rule') return sendJson(response,409,{error:'rule is no longer available; reload before submitting'});
+    return sendJson(response,201,{id,puzzles:getPuzzles(user.id)});
   }
   const ratingMatch=pathname.match(/^\/api\/puzzles\/(\d+)\/complete-rating$/);
   if (request.method==='POST' && ratingMatch) {

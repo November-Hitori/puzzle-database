@@ -30,7 +30,8 @@ database.exec(`
     scope TEXT NOT NULL DEFAULT 'public',
     rule_id INTEGER,
     suggested_date TEXT,
-    submitted_by TEXT
+    submitted_by TEXT,
+    delete_token TEXT NOT NULL DEFAULT ''
   );
 
   CREATE TABLE IF NOT EXISTS puzzle_ratings (
@@ -98,7 +99,8 @@ database.exec(`
     name_revision INTEGER NOT NULL DEFAULT 1,
     description_revision INTEGER NOT NULL DEFAULT 1,
     example_revision INTEGER NOT NULL DEFAULT 1,
-    edit_version INTEGER NOT NULL DEFAULT 1
+    edit_version INTEGER NOT NULL DEFAULT 1,
+    delete_token TEXT NOT NULL DEFAULT ''
   );
   CREATE TABLE IF NOT EXISTS member_sessions (
     token_hash TEXT PRIMARY KEY,
@@ -115,6 +117,10 @@ database.exec(`
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1))
   );
   CREATE TABLE IF NOT EXISTS auth_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  CREATE TABLE IF NOT EXISTS entity_id_sequences (
+    name TEXT PRIMARY KEY,
+    next_id INTEGER NOT NULL CHECK(next_id>0)
+  );
   CREATE TABLE IF NOT EXISTS registration_gate (
     id INTEGER PRIMARY KEY CHECK (id=1),
     token_hash TEXT NOT NULL UNIQUE,
@@ -155,9 +161,11 @@ database.exec(`
 
 // Additive migration for databases created by the original prototype.
 const puzzleColumns = new Set(database.prepare('PRAGMA table_info(puzzles)').all().map((column) => column.name));
-for (const [name, definition] of [['scope', "TEXT NOT NULL DEFAULT 'public'"], ['rule_id', 'INTEGER'], ['suggested_date', 'TEXT'], ['submitted_by', 'TEXT']]) {
+for (const [name, definition] of [['scope', "TEXT NOT NULL DEFAULT 'public'"], ['rule_id', 'INTEGER'], ['suggested_date', 'TEXT'], ['submitted_by', 'TEXT'], ['delete_token', "TEXT NOT NULL DEFAULT ''"]]) {
   if (!puzzleColumns.has(name)) database.exec(`ALTER TABLE puzzles ADD COLUMN ${name} ${definition}`);
 }
+database.exec("UPDATE puzzles SET delete_token=lower(hex(randomblob(16))) WHERE delete_token IS NULL OR delete_token=''");
+database.exec('CREATE UNIQUE INDEX IF NOT EXISTS puzzles_delete_token ON puzzles(delete_token)');
 const trustedUserColumns = new Set(database.prepare('PRAGMA table_info(trusted_users)').all().map((column)=>column.name));
 if (!trustedUserColumns.has('access_code_hash')) database.exec("ALTER TABLE trusted_users ADD COLUMN access_code_hash TEXT NOT NULL DEFAULT ''");
 for (const [name, definition] of [['username', 'TEXT'], ['username_key', 'TEXT'], ['password_hash', 'TEXT'], ['is_active', 'INTEGER NOT NULL DEFAULT 1']]) {
@@ -165,9 +173,11 @@ for (const [name, definition] of [['username', 'TEXT'], ['username_key', 'TEXT']
 }
 database.exec("CREATE UNIQUE INDEX IF NOT EXISTS trusted_users_username_key ON trusted_users(username_key) WHERE username_key IS NOT NULL");
 const ruleColumns=new Set(database.prepare('PRAGMA table_info(rules)').all().map((column)=>column.name));
-for (const [name,definition] of [['example_url',"TEXT NOT NULL DEFAULT ''"],['example_author',"TEXT NOT NULL DEFAULT ''"],['name_revision','INTEGER NOT NULL DEFAULT 1'],['description_revision','INTEGER NOT NULL DEFAULT 1'],['example_revision','INTEGER NOT NULL DEFAULT 1'],['edit_version','INTEGER NOT NULL DEFAULT 1']]) {
+for (const [name,definition] of [['example_url',"TEXT NOT NULL DEFAULT ''"],['example_author',"TEXT NOT NULL DEFAULT ''"],['name_revision','INTEGER NOT NULL DEFAULT 1'],['description_revision','INTEGER NOT NULL DEFAULT 1'],['example_revision','INTEGER NOT NULL DEFAULT 1'],['edit_version','INTEGER NOT NULL DEFAULT 1'],['delete_token',"TEXT NOT NULL DEFAULT ''"]]) {
   if (!ruleColumns.has(name)) database.exec(`ALTER TABLE rules ADD COLUMN ${name} ${definition}`);
 }
+database.exec("UPDATE rules SET delete_token=lower(hex(randomblob(16))) WHERE delete_token IS NULL OR delete_token=''");
+database.exec('CREATE UNIQUE INDEX IF NOT EXISTS rules_delete_token ON rules(delete_token)');
 const seedRuleRevision=database.prepare(`INSERT OR IGNORE INTO rule_item_revisions(rule_id,item,revision,content_json)
   VALUES (?,?,?,?)`);
 for (const row of database.prepare('SELECT * FROM rules').all()) {
@@ -177,10 +187,11 @@ for (const row of database.prepare('SELECT * FROM rules').all()) {
 }
 
 const puzzleCount = database.prepare('SELECT COUNT(*) AS count FROM puzzles').get().count;
-if (puzzleCount === 0) {
+const puzzleSequenceExists=Boolean(database.prepare("SELECT 1 FROM entity_id_sequences WHERE name IN ('puzzles','puzzle-numbers') LIMIT 1").get());
+if (puzzleCount === 0&&!puzzleSequenceExists) {
   const insertPuzzle = database.prepare(`INSERT INTO puzzles
-    (number, title, type, author, source, url, note, rules, input_mode, answer)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    (number, title, type, author, source, url, note, rules, input_mode, answer, delete_token)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const seedPuzzles = [
     [128, 'Thermometer', '逻辑题', 'Mina K.', 'puzz.link', 'https://puzz.link/', '一组温度计交错在网格中。填满它们时，注意每支温度计的方向。', '每支温度计必须从球形端开始连续填满，直到边界或另一支温度计。', 'external', ''],
     [127, 'Five Cells', '逻辑题', 'Yusuke', 'puzz.link', 'https://puzz.link/', '每一块区域都恰好包含五个格子。相邻区域的边界会告诉你下一步。', '将盘面分成每块五格的区域，线条不得形成面积不符的闭合区域。', 'external', ''],
@@ -192,7 +203,7 @@ if (puzzleCount === 0) {
     [121, 'Letter Loop', '文字题', 'Yusuke', '填空题', '', '将字母线索串成一个没有断点的循环。', '根据线索填入一个闭合的字母序列。', 'blank', 'ARCHIVE']
   ];
   database.exec('BEGIN');
-  for (const puzzle of seedPuzzles) insertPuzzle.run(...puzzle);
+  for (const puzzle of seedPuzzles) insertPuzzle.run(...puzzle,randomUUID());
   database.exec('COMMIT');
 
   const insertRating = database.prepare(`INSERT INTO puzzle_ratings
@@ -234,6 +245,21 @@ if (tagCount === 0) {
   for (const [number, tags] of seedTags) for (const tag of tags) insertTag.run(tag, number);
 }
 
+for (const [name,table,column] of [['rules','rules','id'],['puzzles','puzzles','id'],['puzzle-numbers','puzzles','number']]) {
+  const minimum=database.prepare(`SELECT COALESCE(MAX(${column}),0)+1 AS next_id FROM ${table}`).get().next_id;
+  database.prepare(`INSERT INTO entity_id_sequences(name,next_id) VALUES(?,?)
+    ON CONFLICT(name) DO UPDATE SET next_id=MAX(next_id,excluded.next_id)`).run(name,minimum);
+}
+
+function allocateEntityId(name) {
+  const sequence=database.prepare('SELECT next_id FROM entity_id_sequences WHERE name=?').get(name);
+  if (!sequence) throw new Error(`missing ${name} id sequence`);
+  const next=sequence.next_id;
+  const changed=database.prepare('UPDATE entity_id_sequences SET next_id=? WHERE name=? AND next_id=?').run(next+1,name,next);
+  if (changed.changes!==1) throw new Error(`could not allocate ${name} id`);
+  return next;
+}
+
 export function getPuzzles(userId = 'demo-user') {
   const rows = database.prepare(`
     SELECT p.*,
@@ -269,12 +295,18 @@ export function getPuzzles(userId = 'demo-user') {
 }
 
 export function addPuzzle(input) {
-  const nextNumber = database.prepare('SELECT COALESCE(MAX(number), 0) + 1 AS number FROM puzzles').get().number;
-  const result = database.prepare(`INSERT INTO puzzles
-    (number, title, type, author, source, url, note, rules, input_mode, answer, rule_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(nextNumber, input.title, input.type, input.author, input.source, input.url || '', input.note || '等待作者补充说明。', input.rules || '等待作者补充规则。', input.inputMode, input.answer || '', input.ruleId);
-  return Number(result.lastInsertRowid);
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const rule=database.prepare('SELECT id FROM rules WHERE id=?').get(input.ruleId);
+    if (!rule) { database.exec('ROLLBACK'); return {error:'missing-rule'}; }
+    const nextNumber=allocateEntityId('puzzle-numbers'), puzzleId=allocateEntityId('puzzles');
+    const result = database.prepare(`INSERT INTO puzzles
+      (id, number, title, type, author, source, url, note, rules, input_mode, answer, rule_id, delete_token)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(puzzleId,nextNumber, input.title, input.type, input.author, input.source, input.url || '', input.note || '等待作者补充说明。', input.rules || '等待作者补充规则。', input.inputMode, input.answer || '', input.ruleId, randomUUID());
+    database.exec('COMMIT');
+    return Number(result.lastInsertRowid);
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 
 const ruleFromRow = (row) => row && ({
@@ -282,6 +314,8 @@ const ruleFromRow = (row) => row && ({
   rulesZh: JSON.parse(row.rules_zh), rulesEn: JSON.parse(row.rules_en),
   category: row.category, isVariant: Boolean(row.is_variant), baseRuleId: row.base_rule_id,
   exampleUrl: row.example_url, exampleAuthor: row.example_author ?? '',
+  deleteToken: row.delete_token,
+  ...(row.base_rule_valid === undefined ? {} : {baseRuleValid:Boolean(row.base_rule_valid)}),
   editVersion: row.edit_version,
   revisions: {name:row.name_revision,description:row.description_revision,example:row.example_revision},
   ...(row.base_title_zh ? { baseRuleTitleZh: row.base_title_zh } : {}),
@@ -296,6 +330,7 @@ function contentForRule(rule,item) {
 function attachRuleQuality(rule,userId) {
   if (!rule) return null;
   const errors=getRuleFieldErrors(rule);
+  const {baseRuleValid: _baseRuleValid,...publicRule}=rule;
   const fieldNames={name:'名称',description:'说明',example:'例题'};
   const groups={};
   for (const item of RULE_AUDIT_ITEMS) {
@@ -328,10 +363,11 @@ function attachRuleQuality(rule,userId) {
   for (const item of RULE_AUDIT_ITEMS) {
     if (groups[item].status!=='approved') warnings.push({code:`${item}NotFullyAudited`,item,message:`${fieldNames[item]}尚未完成三人审计`});
   }
-  return {...rule,quality:{errors,warnings,groups}};
+  return {...publicRule,quality:{errors,warnings,groups}};
 }
 function selectRule(id) {
-  return ruleFromRow(database.prepare(`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en
+  return ruleFromRow(database.prepare(`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en,
+      CASE WHEN r.is_variant=0 THEN 1 WHEN b.id IS NOT NULL AND b.is_variant=0 AND b.id<>r.id THEN 1 ELSE 0 END AS base_rule_valid
     FROM rules r LEFT JOIN rules b ON b.id = r.base_rule_id WHERE r.id = ?`).get(id));
 }
 export function getRules(userId=null) {
@@ -340,12 +376,44 @@ export function getRules(userId=null) {
 export function getRule(id,userId=null) { return attachRuleQuality(selectRule(id),userId); }
 export function ruleHasVariants(id) { return Boolean(database.prepare('SELECT 1 FROM rules WHERE base_rule_id=? LIMIT 1').get(id)); }
 
+export function deleteRule(id,deleteToken,expectedEditVersion) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const row=database.prepare('SELECT delete_token,edit_version FROM rules WHERE id=?').get(id);
+    if (!row) { database.exec('ROLLBACK'); return {error:'missing'}; }
+    if (typeof deleteToken!=='string'||!deleteToken||row.delete_token!==deleteToken||row.edit_version!==expectedEditVersion) {
+      database.exec('ROLLBACK'); return {error:'stale'};
+    }
+    const references={
+      publicPuzzles:database.prepare("SELECT COUNT(*) AS count FROM puzzles WHERE rule_id=? AND scope='public'").get(id).count,
+      calendarPuzzles:database.prepare("SELECT COUNT(*) AS count FROM puzzles WHERE rule_id=? AND scope='calendar'").get(id).count,
+      otherPuzzles:database.prepare("SELECT COUNT(*) AS count FROM puzzles WHERE rule_id=? AND scope NOT IN ('public','calendar')").get(id).count,
+      totalPuzzles:database.prepare('SELECT COUNT(*) AS count FROM puzzles WHERE rule_id=?').get(id).count,
+      variants:database.prepare('SELECT COUNT(*) AS count FROM rules WHERE base_rule_id=?').get(id).count
+    };
+    if (Object.values(references).some((count)=>count>0)) {
+      database.exec('ROLLBACK'); return {error:'referenced',references};
+    }
+    database.prepare('DELETE FROM rule_item_votes WHERE rule_id=?').run(id);
+    database.prepare('DELETE FROM rule_item_audit_events WHERE rule_id=?').run(id);
+    database.prepare('DELETE FROM rule_item_revisions WHERE rule_id=?').run(id);
+    const deleted=database.prepare('DELETE FROM rules WHERE id=? AND delete_token=? AND edit_version=?').run(id,deleteToken,expectedEditVersion);
+    if (!deleted.changes) { database.exec('ROLLBACK'); return {error:'stale'}; }
+    database.exec('COMMIT');
+    return {deleted:true};
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
+}
+
 export function addRule(input,userId) {
   database.exec('BEGIN IMMEDIATE');
   try {
-    const result=database.prepare(`INSERT INTO rules (title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id,example_url,example_author)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(input.titleZh,input.titleEn,JSON.stringify(input.rulesZh),JSON.stringify(input.rulesEn),input.category,input.isVariant?1:0,input.baseRuleId,input.exampleUrl,input.exampleAuthor??'');
-    const id=Number(result.lastInsertRowid);
+    if (input.isVariant&&input.baseRuleId!==undefined&&input.baseRuleId!==null&&input.baseRuleId!=='') {
+      const base=database.prepare('SELECT is_variant FROM rules WHERE id=?').get(input.baseRuleId);
+      if (!base||base.is_variant) { database.exec('ROLLBACK'); return {error:'invalid-base'}; }
+    }
+    const id=allocateEntityId('rules');
+    const result=database.prepare(`INSERT INTO rules (id,title_zh,title_en,rules_zh,rules_en,category,is_variant,base_rule_id,example_url,example_author,delete_token)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id,input.titleZh,input.titleEn,JSON.stringify(input.rulesZh),JSON.stringify(input.rulesEn),input.category,input.isVariant?1:0,input.baseRuleId,input.exampleUrl,input.exampleAuthor??'',randomUUID());
     const save=database.prepare(`INSERT INTO rule_item_revisions(rule_id,item,revision,content_json,changed_by_user_id)
       VALUES (?,?,1,?,?)`);
     for (const item of RULE_AUDIT_ITEMS) save.run(id,item,JSON.stringify(contentForRule(input,item)),userId);
@@ -360,6 +428,13 @@ export function updateRule(id,input,userId,expectedRevisions) {
     const current=ruleFromRow(database.prepare('SELECT * FROM rules WHERE id=?').get(id));
     if (!current) { database.exec('ROLLBACK'); return {error:'missing'}; }
     const next={...current,...input};
+    if (!current.isVariant&&next.isVariant&&database.prepare('SELECT 1 FROM rules WHERE base_rule_id=? LIMIT 1').get(id)) {
+      database.exec('ROLLBACK'); return {error:'has-variants'};
+    }
+    if (next.isVariant&&next.baseRuleId!==undefined&&next.baseRuleId!==null&&next.baseRuleId!=='') {
+      const base=database.prepare('SELECT is_variant FROM rules WHERE id=?').get(next.baseRuleId);
+      if (!base||base.is_variant||next.baseRuleId===id) { database.exec('ROLLBACK'); return {error:'invalid-base'}; }
+    }
     const changedItems=RULE_AUDIT_ITEMS.filter((item)=>JSON.stringify(contentForRule(current,item))!==JSON.stringify(contentForRule(next,item)));
     if (expectedRevisions?.expectedEditVersion!==current.editVersion||RULE_AUDIT_ITEMS.some((item)=>expectedRevisions[item]!==current.revisions[item])) { database.exec('ROLLBACK'); return {error:'stale'}; }
     const nextRevisions={...current.revisions};
@@ -432,6 +507,7 @@ function puzzleByNumber(number, userId, scope) {
   };
   if (scope === 'calendar') {
     puzzle.scope = 'calendar'; puzzle.ruleId = row.rule_id; puzzle.rule = rule;
+    puzzle.deleteToken = row.delete_token;
     puzzle.suggestedDate = row.suggested_date; puzzle.submittedBy = { id: row.submitted_by, name: row.submitter_name || '' };
   }
   return puzzle;
@@ -443,12 +519,33 @@ export function getCalendarPuzzles(userId) {
 }
 export function getCalendarPuzzle(number,userId) { return puzzleByNumber(number,userId,'calendar'); }
 export function addCalendarPuzzle(input,user) {
-  const rule = getRule(input.ruleId);
-  if (!rule) throw new Error('invalid rule');
-  const next = database.prepare('SELECT COALESCE(MAX(number),0)+1 AS n FROM puzzles').get().n;
-  const result = database.prepare(`INSERT INTO puzzles (number,title,type,author,source,url,note,rules,input_mode,answer,scope,rule_id,suggested_date,submitted_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,'calendar',?,?,?)`).run(next,input.title.trim(),rule.category,input.author.trim(),input.source.trim(),input.url || '',input.note || '',rule.rulesZh.join('\n'),'external'===input.inputMode?'external':'blank',input.inputMode==='blank'?(input.answer||''):'',input.ruleId,input.suggestedDate || null,user.id);
-  return { id: Number(result.lastInsertRowid), puzzle: getCalendarPuzzle(next,user.id) };
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const rule = selectRule(input.ruleId);
+    if (!rule) { database.exec('ROLLBACK'); return {error:'missing-rule'}; }
+    const next=allocateEntityId('puzzle-numbers'), puzzleId=allocateEntityId('puzzles');
+    const result = database.prepare(`INSERT INTO puzzles (id,number,title,type,author,source,url,note,rules,input_mode,answer,scope,rule_id,suggested_date,submitted_by,delete_token)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,'calendar',?,?,?,?)`).run(puzzleId,next,input.title.trim(),rule.category,input.author.trim(),input.source.trim(),input.url || '',input.note || '',rule.rulesZh.join('\n'),'external'===input.inputMode?'external':'blank',input.inputMode==='blank'?(input.answer||''):'',input.ruleId,input.suggestedDate || null,user.id,randomUUID());
+    database.exec('COMMIT');
+    return { id: Number(result.lastInsertRowid), puzzle: getCalendarPuzzle(next,user.id) };
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
+}
+
+export function deleteCalendarPuzzle(number,userId,deleteToken) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const puzzle=database.prepare("SELECT id,submitted_by,delete_token FROM puzzles WHERE number=? AND scope='calendar'").get(number);
+    if (!puzzle) { database.exec('ROLLBACK'); return {error:'missing'}; }
+    if (typeof deleteToken!=='string'||!deleteToken||puzzle.delete_token!==deleteToken) { database.exec('ROLLBACK'); return {error:'stale'}; }
+    if (puzzle.submitted_by!==userId) { database.exec('ROLLBACK'); return {error:'forbidden'}; }
+    database.prepare('DELETE FROM puzzle_ratings WHERE puzzle_id=?').run(puzzle.id);
+    database.prepare('DELETE FROM puzzle_completions WHERE puzzle_id=?').run(puzzle.id);
+    database.prepare('DELETE FROM puzzle_tags WHERE puzzle_id=?').run(puzzle.id);
+    database.prepare('DELETE FROM collection_puzzles WHERE puzzle_id=?').run(puzzle.id);
+    database.prepare('DELETE FROM puzzles WHERE id=? AND delete_token=?').run(puzzle.id,deleteToken);
+    database.exec('COMMIT');
+    return {deleted:true,number};
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 export function updateCalendarSuggestedDate(number,userId,date) {
   const row = database.prepare("SELECT id,submitted_by FROM puzzles WHERE number=? AND scope='calendar'").get(number);

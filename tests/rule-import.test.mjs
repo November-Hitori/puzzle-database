@@ -27,12 +27,14 @@ test('import defaults to database-free dry-run and applies additively/idempotent
     ] }), { mode: 0o600 });
     const database = new DatabaseSync(dbPath);
     database.exec(`PRAGMA foreign_keys=ON;
-      CREATE TABLE rules (id INTEGER PRIMARY KEY,title_zh TEXT NOT NULL,title_en TEXT NOT NULL,rules_zh TEXT NOT NULL,rules_en TEXT NOT NULL,category TEXT NOT NULL,is_variant INTEGER NOT NULL,base_rule_id INTEGER,example_url TEXT NOT NULL DEFAULT '',example_author TEXT NOT NULL DEFAULT '',name_revision INTEGER NOT NULL DEFAULT 1,description_revision INTEGER NOT NULL DEFAULT 1,example_revision INTEGER NOT NULL DEFAULT 1,edit_version INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE rules (id INTEGER PRIMARY KEY,title_zh TEXT NOT NULL,title_en TEXT NOT NULL,rules_zh TEXT NOT NULL,rules_en TEXT NOT NULL,category TEXT NOT NULL,is_variant INTEGER NOT NULL,base_rule_id INTEGER,example_url TEXT NOT NULL DEFAULT '',example_author TEXT NOT NULL DEFAULT '',name_revision INTEGER NOT NULL DEFAULT 1,description_revision INTEGER NOT NULL DEFAULT 1,example_revision INTEGER NOT NULL DEFAULT 1,edit_version INTEGER NOT NULL DEFAULT 1,delete_token TEXT NOT NULL DEFAULT '' UNIQUE);
+      CREATE TABLE entity_id_sequences (name TEXT PRIMARY KEY,next_id INTEGER NOT NULL CHECK(next_id>0));
+      INSERT INTO entity_id_sequences VALUES('rules',78);
       CREATE TABLE rule_item_revisions (rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,content_json TEXT NOT NULL,changed_by_user_id TEXT,PRIMARY KEY(rule_id,item,revision));
       CREATE TABLE rule_item_votes (rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,user_id TEXT NOT NULL,decision TEXT NOT NULL);
       CREATE TABLE rule_item_audit_events (id INTEGER PRIMARY KEY,rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,user_id TEXT NOT NULL,decision TEXT NOT NULL);
-      INSERT INTO rules(id,title_zh,title_en,rules_zh,rules_en,category,is_variant,example_url,example_author) VALUES
-        (76,'','Legacy english','[]','[]','其它',0,'',''),(77,'既有规则','English same','["old"]','[]','其它',0,'','');
+      INSERT INTO rules(id,title_zh,title_en,rules_zh,rules_en,category,is_variant,example_url,example_author,delete_token) VALUES
+        (76,'','Legacy english','[]','[]','其它',0,'','','legacy-token-76'),(77,'既有规则','English same','["old"]','[]','其它',0,'','','legacy-token-77');
       INSERT INTO rule_item_revisions(rule_id,item,revision,content_json) VALUES
         (76,'name',1,'{"titleZh":"","titleEn":"Legacy english"}'),(77,'name',1,'{"titleZh":"既有规则","titleEn":"English same"}');`);
     database.close();
@@ -46,6 +48,15 @@ test('import defaults to database-free dry-run and applies additively/idempotent
     const first = apply();
     assert.equal(first.status, 0, `${first.stderr}\n${first.error || ''}\n${first.stdout}`);
     assert.deepEqual(JSON.parse(first.stdout), { mode: 'apply', sourceRows: 5, inserted: 3, existingSkipped: 2, existingSkippedRows: [3, 7], total: 5 });
+    const tokenSnapshot = new DatabaseSync(dbPath, { readOnly: true });
+    const insertedTokens = tokenSnapshot.prepare('SELECT id,delete_token FROM rules WHERE id>77 ORDER BY id').all().map((row) => ({ ...row }));
+    assert.equal(insertedTokens.length, 3);
+    assert.ok(insertedTokens.every((row) => row.delete_token));
+    assert.equal(new Set(insertedTokens.map((row) => row.delete_token)).size, 3);
+    tokenSnapshot.close();
+    const sequenceAfterFirst = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(sequenceAfterFirst.prepare("SELECT next_id FROM entity_id_sequences WHERE name='rules'").get().next_id,81);
+    sequenceAfterFirst.close();
     const second = apply();
     assert.equal(second.status, 0, `${second.stderr}\n${second.error || ''}\n${second.stdout}`);
     assert.deepEqual(JSON.parse(second.stdout), { mode: 'apply', sourceRows: 5, inserted: 0, existingSkipped: 5, existingSkippedRows: [3, 4, 5, 6, 7], total: 5 });
@@ -58,6 +69,8 @@ test('import defaults to database-free dry-run and applies additively/idempotent
       { id: 79, title_zh: '第二规则', example_author: '' },
       { id: 80, title_zh: '', example_author: '' }
     ]);
+    assert.deepEqual(verify.prepare('SELECT id,delete_token FROM rules WHERE id>77 ORDER BY id').all().map((row) => ({ ...row })), insertedTokens);
+    assert.equal(verify.prepare("SELECT next_id FROM entity_id_sequences WHERE name='rules'").get().next_id,81);
     assert.equal(verify.prepare('SELECT COUNT(*) AS count FROM rule_item_revisions').get().count, 11);
     assert.equal(verify.prepare('SELECT LENGTH(example_url) AS chars FROM rules WHERE title_zh=?').get('新规则').chars, oversizedButSupportedUrl.length);
     assert.equal(verify.prepare('SELECT COUNT(*) AS count FROM rule_item_votes').get().count, 0);
@@ -96,7 +109,9 @@ test('full private workbook payload imports atomically, idempotently, and withou
     const dbPath = path.join(tempDir, 'isolated.sqlite');
     const database = new DatabaseSync(dbPath);
     database.exec(`PRAGMA foreign_keys=ON;
-      CREATE TABLE rules (id INTEGER PRIMARY KEY,title_zh TEXT NOT NULL,title_en TEXT NOT NULL,rules_zh TEXT NOT NULL,rules_en TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN ('涂黑','填数','分区','置物','路径','其它')),is_variant INTEGER NOT NULL,base_rule_id INTEGER,example_url TEXT NOT NULL DEFAULT '',example_author TEXT NOT NULL DEFAULT '',name_revision INTEGER NOT NULL DEFAULT 1,description_revision INTEGER NOT NULL DEFAULT 1,example_revision INTEGER NOT NULL DEFAULT 1,edit_version INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE rules (id INTEGER PRIMARY KEY,title_zh TEXT NOT NULL,title_en TEXT NOT NULL,rules_zh TEXT NOT NULL,rules_en TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN ('涂黑','填数','分区','置物','路径','其它')),is_variant INTEGER NOT NULL,base_rule_id INTEGER,example_url TEXT NOT NULL DEFAULT '',example_author TEXT NOT NULL DEFAULT '',name_revision INTEGER NOT NULL DEFAULT 1,description_revision INTEGER NOT NULL DEFAULT 1,example_revision INTEGER NOT NULL DEFAULT 1,edit_version INTEGER NOT NULL DEFAULT 1,delete_token TEXT NOT NULL DEFAULT '' UNIQUE);
+      CREATE TABLE entity_id_sequences (name TEXT PRIMARY KEY,next_id INTEGER NOT NULL CHECK(next_id>0));
+      INSERT INTO entity_id_sequences VALUES('rules',43);
       CREATE TABLE rule_item_revisions (rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,content_json TEXT NOT NULL,changed_by_user_id TEXT,PRIMARY KEY(rule_id,item,revision));
       CREATE TABLE rule_item_votes (rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,user_id TEXT NOT NULL,decision TEXT NOT NULL);
       CREATE TABLE rule_item_audit_events (id INTEGER PRIMARY KEY,rule_id INTEGER NOT NULL,item TEXT NOT NULL,revision INTEGER NOT NULL,user_id TEXT NOT NULL,decision TEXT NOT NULL);

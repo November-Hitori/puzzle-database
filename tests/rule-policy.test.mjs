@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_EXAMPLE_URL_MAX_LENGTH, RULE_REQUIRED_APPROVALS, validateRuleExampleUrl } from '../rule-policy.mjs';
 
-test('rule quality derives bilingual deficits and variant base requirements',()=>{
+test('rule quality requires Chinese descriptions but accepts absent English clauses',()=>{
   const draft={titleZh:'中文名',titleEn:'',rulesZh:['中文说明'],rulesEn:[],isVariant:true,baseRuleId:null,exampleUrl:''};
-  assert.deepEqual(getRuleFieldErrors(draft).map((error)=>error.code),['missingEnName','missingEnDescription','missingVariantBase','missingExample']);
+  assert.deepEqual(getRuleFieldErrors(draft).map((error)=>error.code),['missingEnName','missingVariantBase','missingExample']);
   assert.equal(isRuleItemComplete(draft,'name'),false);
   assert.equal(isRuleItemComplete(draft,'description'),false);
   assert.equal(isRuleItemComplete(draft,'example'),false);
+  const englishOptional={...draft,isVariant:false,rulesEn:['  ']};
+  assert.deepEqual(getRuleFieldErrors(englishOptional).map((error)=>error.code),['missingEnName','missingExample']);
+  assert.equal(isRuleItemComplete(englishOptional,'description'),true);
   assert.equal(RULE_REQUIRED_APPROVALS,3);
   assert.deepEqual(RULE_AUDIT_ITEMS,['name','description','example']);
 });
