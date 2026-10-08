@@ -7,7 +7,7 @@ export const CALENDAR_REVIEW_TAGS = Object.freeze([
   '美观'
 ]);
 
-export const CALENDAR_REVIEW_VOTES = Object.freeze(['support','neutral','oppose','veto']);
+export const CALENDAR_REVIEW_VOTES = Object.freeze(['support','oppose','veto']);
 export const CALENDAR_APPROVAL_NET_SUPPORT = 3;
 
 export function normalizeCalendarReviewInput(input) {

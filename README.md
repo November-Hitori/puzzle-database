@@ -25,7 +25,13 @@ API 包括：
 - `POST /api/register`：使用共享邀请码注册用户名/密码并自动建立私有会话
 - `GET /api/session`、`POST /api/session`、`DELETE /api/session`：查询会话、使用用户名/密码登录和销毁会话
 - `/api/rules`：读取、创建、更新和删除规则；可分组提交名称、中文说明（英文可选）与 Penpa 例题审计。存在公共题目、日历题目或变体引用时不能删除
-- `/api/calendar/puzzles`：读写独立日历投稿；完成记录包含 1–6 难度、六种可选评价标签，以及 `support`、`neutral`、`oppose` 或 `veto` 每轮投票。净支持达到 3 票后通过，否决会转入可重新投稿的待处理区
+- `/api/calendar/puzzles`：读写独立日历投稿；完成记录包含 1–6 难度、六种可选评价标签，以及 `support`、`oppose` 或 `veto` 每轮投票。净支持达到 3 票后通过，否决会转入可重新投稿的待处理区
+- `/api/calendar/puzzles/:number/comments`：登录成员可独立留言，包括否决后；已完成成员直接读取，未完成者默认隐藏，主动查看时使用 `?reveal=1`
+- `PATCH /api/calendar/puzzles/:number`：投稿者可修改名称、链接，携带 `expectedEditVersion` 和 `expectedReviewRound`；`clearReviews` 默认 `false`，为 `true` 时删除所有轮次的难度、标签、投票并开启新轮次，保留完成记录和留言
+- `POST /api/calendar/puzzles/:number/assignment`：成员分配或取消正式日期，携带 `expectedEditVersion`、`expectedReviewRound` 与 `assignedDate`（完整日期或 `null`）；非通过题目、年份不符、无效日期和日期冲突均拒绝
+- `POST /api/calendar/puzzles/:number/penpa-audits`：对当前 `revision`、`guidelinesRevision` 提交 `approve` / `reject` 和可选建议；重复投票不重复计数
+- `POST /api/rules/:id/error-ignores`、`POST /api/calendar/puzzles/:number/error-ignores`：以当前错误的 `key`、`revision` 提交 `ignored` 和可选 `reason`；错误对应内容改版后旧忽略不适用
+- `GET /api/penpa-guidelines`：读取制图规范正文与规范版本
 - `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读
 - `/api/puzzles`、`/api/folders`、`/api/collections`、`/api/tags`：现有公共题库管理 API，只包含公共题目
 
@@ -38,9 +44,15 @@ API 包括：
 ## 当前入口
 
 - 邀请码门控注册、用户名/密码登录和私有会话
-- 日历谜题列表、待重新进入投稿和可追溯的逐轮投票/评价历史
-- 日历谜题提交：默认 2028 年，可不选月份和日期；服务器根据登录账号记录投稿者
+- 待审核区、leftover 区、待分配区和按月份展示的完成区，以及可追溯的逐轮投票/评价历史
+- 日历谜题提交：默认 2028 年；分别填写 Penpa 编辑、Penpa 解题和 puzz.link 链接。外链投稿至少提供一种解题链接，编辑链接可后补；建议日期不占正式档期，投稿者由登录账号确定
 - 个人完成状态、评分与规则浏览
+- 三票净支持后通知上传者补齐缺少的 Penpa 链接；正式日期不得重复，取消分配后回到待分配区
+- Penpa 制图规范独立接受三名不同成员审计，规范正文或 Penpa 链接变化后需重新审计；具体规范见 [docs/penpa.md](docs/penpa.md)
+- 规则与题目的质量错误可明确忽略或恢复，记录忽略者、理由和版本；忽略不替代三人审计
+- 未完成题目的平均难度和留言默认以剧透标记遮挡，点击后查看
+- 规则原型使用支持中英文搜索及键盘选择的下拉框
+- 规则审计和题目评价只返回被修改的条目；前端局部更新并显示提交中状态，评价题目时保留解题 iframe
 - 桌面和移动端布局
 
 旧版首页、公共题库、题集、文件夹、作者和个人记录界面已从当前入口隐藏；既有 SQLite 内容会保留，不会因界面隐藏而删除。
@@ -53,9 +65,22 @@ npm test
 
 后端测试使用临时 SQLite 数据库，不会读取或写入 `data/puzarchive.sqlite`。
 
+真实桌面浏览器验收使用 [tools/browser-check.mjs](tools/browser-check.mjs)。它在随机 loopback 端口启动真实服务，并创建隔离账号和 SQLite；不读取既有账号或数据库。需要已安装的 Chromium，以及单独的 Playwright 核心测试驱动，应用本身不增加第三方依赖。例如在 Bash 中：
+
+```sh
+npm install --prefix /tmp/puzarchive-browser-test --no-save --package-lock=false playwright-core
+export PUZARCHIVE_PLAYWRIGHT_MODULE=/tmp/puzarchive-browser-test/node_modules/playwright-core/index.mjs
+export PUZARCHIVE_BROWSER_EXECUTABLE=/path/to/chromium
+export PUZARCHIVE_BROWSER_SCREENSHOT_DIR=docs/screenshots
+npm run test:browser
+```
+
+本工作区可用 `bash ../start-puzarchive.sh test:browser` 自动选择本地 Node.js 22 运行时。若 Chromium 需要从独立目录加载系统库，设置 `PUZARCHIVE_BROWSER_LIB_DIR`。受限执行环境需要允许浏览器启动和本机端口监听。测试覆盖注册登录、剧透、留言失败恢复、延迟投票、局部审计、搜索选择、错误忽略、四区流转和日期分配；外部解题平台以隔离测试页面替代，因此不把其加载状态当作验收结果。
+
+
 ## SQLite 数据
 
-升级会向既有数据库添加日历审核轮次、评价、投票与系统通知收件箱元数据；旧日历评分仅作为第一轮难度的初始评价，旧评分、完成时间、题目 ID 和规则快照均保留，且迁移不会生成历史投票或通知。新一轮会保留每一轮的最终投票、评价和完成记录。启动升级前建议先创建在线备份。已有题目保持原范围且不会被猜测或翻译规则。
+升级会向既有数据库添加日历审核轮次、评价、投票与系统通知收件箱元数据；旧日历评分仅作为第一轮难度的初始评价，旧评分、完成时间、题目 ID 和规则快照均保留，且迁移不会生成历史投票或通知。新一轮会保留每一轮的最终投票、评价和完成记录。升级还会按可识别的平台和模式保留并拆分旧链接，原始链接、题目 ID、规则快照、审核状态和完成记录保留；原建议日期不会自动转为正式分配日期。对外 `calendarStatus` 继续记录社区投票状态，`calendarArea` 根据质量和日期动态计算为 `review`、`leftover`、`allocation` 或 `finished`；规则审核状态发生变化后会重新计算。制图规范从工作区根目录 `docs/penpa.md` 或发行包的 `docs/penpa.md` 读取，测试可用 `PUZARCHIVE_PENPA_GUIDELINES_PATH` 指定隔离文本。本次升级会一次性删除旧中立投票、其中立投票所在轮次的难度与标签评价和中立投票事件；完成记录及其他投票、评价保留，可重新评价。清理逻辑位于 `calendar-review-migration.mjs`。启动升级前建议先创建在线备份。已有题目保持原范围且不会被猜测或翻译规则。
 
 ## 私有服务器部署
 

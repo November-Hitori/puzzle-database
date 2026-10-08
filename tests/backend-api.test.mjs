@@ -189,10 +189,11 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   const review={difficulty:3,tags:['逻辑通顺'],vote:'support',expectedReviewRound:1};
   assert.equal((await request(`/api/calendar/puzzles/${number}/complete-rating`,{method:'POST',body:JSON.stringify(review)},lin)).response.status,200);
   const rateUpdate=await request(`/api/calendar/puzzles/${number}/complete-rating`,{method:'POST',body:JSON.stringify({...review,difficulty:1,tags:['美观']})},lin);
-  assert.equal(rateUpdate.body.puzzles[0].votes,1);
-  assert.deepEqual(rateUpdate.body.puzzles[0].ratings,[0,0,0]);
-  assert.equal(rateUpdate.body.puzzles[0].evaluation.difficulty,1);
-  assert.deepEqual(rateUpdate.body.puzzles[0].evaluation.tags,['美观']);
+  assert.equal(Object.hasOwn(rateUpdate.body,'puzzles'),false);
+  assert.equal(rateUpdate.body.puzzle.votes,1);
+  assert.deepEqual(rateUpdate.body.puzzle.ratings,[0,0,0]);
+  assert.equal(rateUpdate.body.puzzle.evaluation.difficulty,1);
+  assert.deepEqual(rateUpdate.body.puzzle.evaluation.tags,['美观']);
   const linCalendar=await request('/api/calendar/puzzles',{},lin);
   const adaCalendar=await request('/api/calendar/puzzles',{},ada);
   assert.equal(linCalendar.body.puzzles[0].completed,true);
@@ -212,19 +213,20 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(invalidScore.response.status,400);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM calendar_evaluations WHERE puzzle_id=(SELECT id FROM puzzles WHERE number=?)').get(newCalendarNumber).count,0);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM puzzle_completions WHERE puzzle_id=(SELECT id FROM puzzles WHERE number=?)').get(newCalendarNumber).count,0);
-  for (const [cookie,vote] of [[ada,'support'],[lin,'support'],[bea,'support'],[cy,'support'],[dan,'neutral']]) {
+  for (const [cookie,vote] of [[ada,'support'],[lin,'support'],[bea,'support'],[cy,'support'],[dan,'oppose']]) {
     const result=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor(vote))},cookie);
     assert.equal(result.response.status,200);
   }
   let latest=(await request(`/api/calendar/puzzles/${newCalendarNumber}`,{},ada)).body.puzzle;
   assert.equal(latest.calendarStatus,'approved');
-  assert.equal(latest.review.netSupport,4);
+  assert.equal(latest.review.netSupport,3);
   assert.equal(latest.completed,true);
   assert.deepEqual(latest.reviewHistory.map((round)=>round.reviewRound),[1]);
   assert.equal(latest.reviewHistory[0].evaluationCount,5);
   database.prepare('UPDATE trusted_users SET is_active=0 WHERE username=?').run('Dan');
   latest=(await request(`/api/calendar/puzzles/${newCalendarNumber}`,{},ada)).body.puzzle;
-  assert.equal(latest.review.neutral,1);
+  assert.equal(latest.review.oppose,1);
+  assert.equal(Object.hasOwn(latest.review,'neutral'),false);
   assert.equal(latest.reviewHistory[0].evaluationCount,5);
   database.prepare('UPDATE trusted_users SET is_active=1 WHERE username=?').run('Dan');
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM calendar_review_votes WHERE user_id='forged-reviewer'").get().count,0);
@@ -399,6 +401,7 @@ test('rule drafts, independent three-person audits, sticky rejection, and revisi
   assert.equal(draftApprove.response.status,400);
   const draftReject=await request(`/api/rules/${draft.body.rule.id}/audits`,{method:'POST',body:JSON.stringify({item:'name',decision:'reject',revision:1})},reviewers[1].cookie);
   assert.equal(draftReject.response.status,200);
+  assert.equal(Object.hasOwn(draftReject.body,'rules'),false);
   assert.equal(draftReject.body.rule.quality.groups.name.status,'rejected');
   assert.equal(draftReject.body.rule.quality.groups.name.rejectionSuggestion,'');
   assert.ok(draftReject.body.rule.quality.errors.some((error)=>error.code==='auditRejected'&&error.item==='name'));

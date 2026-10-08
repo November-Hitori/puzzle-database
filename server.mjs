@@ -10,9 +10,11 @@ import {
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
   getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
   updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
-  reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
+  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
 } from './db.mjs';
-import { parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
+import { getPenpaGuidelines } from './penpa-guidelines.mjs';
+import { normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
+import { getPuzzleSource, parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } from './puzzle-url.mjs';
 import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
@@ -24,7 +26,7 @@ const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'truste
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
 const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs']);
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs','calendar-workflow-policy.mjs']);
 const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
@@ -299,6 +301,15 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (result.error) return sendJson(response,409,{error:'rule revisions changed; reload before editing'});
     return sendJson(response,200,{rule:result.rule,rules:getRules(user.id)});
   }
+  const ignoreMatch=pathname.match(/^\/api\/(rules|calendar\/puzzles)\/(\d+)\/error-ignores$/);
+  if (ignoreMatch&&request.method==='POST') {
+    const input=await readJson(request);
+    if (!validText(input.key,240,true)||!Number.isSafeInteger(input.revision)||input.revision<1||typeof input.ignored!=='boolean'||!validText(input.reason??'',500)) return sendJson(response,400,{error:'invalid error ignore fields'});
+    const result=setQualityErrorIgnored(ignoreMatch[1]==='rules'?'rule':'puzzle',Number(ignoreMatch[2]),user.id,{...input,reason:(input.reason||'').trim()});
+    if (result.error==='missing') return sendJson(response,404,{error:'entity not found'});
+    if (result.error) return sendJson(response,409,{error:'quality error changed; reload before ignoring'});
+    return sendJson(response,200,result);
+  }
   const auditMatch=pathname.match(/^\/api\/rules\/(\d+)\/audits$/);
   if (request.method==='POST'&&auditMatch) {
     const input=await readJson(request),suggestion=input.suggestion===undefined?'':input.suggestion;
@@ -309,26 +320,58 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (result.error==='incomplete') return sendJson(response,400,{error:'cannot approve an incomplete rule item'});
     if (result.error==='sticky'||result.error==='rejected') return sendJson(response,409,{error:'rejected item requires a content edit before further approval'});
     if (result.error) return sendJson(response,400,{error:'invalid rule audit'});
-    return sendJson(response,200,{rule:result.rule,rules:getRules(user.id)});
+    return sendJson(response,200,{rule:result.rule});
   }
 
+  if (request.method==='GET' && pathname==='/api/penpa-guidelines') return sendJson(response,200,getPenpaGuidelines());
   if (request.method==='GET' && pathname==='/api/calendar/puzzles') return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
   if (request.method==='GET' && pathname==='/api/calendar/leftovers') return sendJson(response,200,{puzzles:getCalendarLeftovers(user.id)});
   const calendarMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)$/);
   if (request.method==='GET' && calendarMatch) { const puzzle=getCalendarPuzzle(Number(calendarMatch[1]),user.id); return puzzle?sendJson(response,200,{puzzle}):sendJson(response,404,{error:'puzzle not found'}); }
   if (request.method==='POST' && pathname==='/api/calendar/puzzles') {
     const input=await readJson(request);
-    if (!validText(input.title,200,true)||(input.author!==undefined&&!validText(input.author,200))||!validText(input.source,120,true)||(input.url!==undefined&&!validText(input.url,3000))||(input.note!==undefined&&!validText(input.note,2000))||!['external','blank'].includes(input.inputMode)) return sendJson(response,400,{error:'invalid puzzle fields'});
+    if (!validText(input.title,200,true)||(input.author!==undefined&&!validText(input.author,200))||!validText(input.source,120,true)||(input.url!==undefined&&!validText(input.url,4096))||(input.note!==undefined&&!validText(input.note,2000))||!['external','blank'].includes(input.inputMode)) return sendJson(response,400,{error:'invalid puzzle fields'});
     if (!getRule(Number(input.ruleId))) return sendJson(response,400,{error:'a valid ruleId is required'});
-    if (input.inputMode==='external' && !parseTrustedPuzzleUrl(input.url)) return sendJson(response,400,{error:'only supported puzzle tool URLs are allowed'});
+    const links=normalizeCalendarLinks(input);
+    if (links.error||(input.inputMode==='external'&&!links.value.url)) return sendJson(response,400,{error:links.error||'a solver link is required'});
     const dateFields=normalizeCalendarDateFields(input);
     if (dateFields.error) return sendJson(response,400,{error:dateFields.error});
     if (input.inputMode==='blank' && !validText(input.answer||'',2000)) return sendJson(response,400,{error:'invalid answer'});
     const author=(input.author===undefined||!input.author.trim())?(user.username||user.name):input.author.trim();
-    const created=addCalendarPuzzle({...input,author,...dateFields.value},user);
+    const created=addCalendarPuzzle({...input,...links.value,author,...dateFields.value},user);
     if (created.error==='missing-rule') return sendJson(response,409,{error:'rule is no longer available; reload before submitting'});
     const puzzles=getCalendarPuzzles(user.id);
     return sendJson(response,201,{...created,puzzles});
+  }
+  const assignmentMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/assignment$/);
+  if (assignmentMatch&&request.method==='POST') {
+    const input=await readJson(request);
+    if (!Object.hasOwn(input,'assignedDate')||!validDate(input.assignedDate)||!Number.isSafeInteger(input.expectedEditVersion)||input.expectedEditVersion<1||!Number.isSafeInteger(input.expectedReviewRound)||input.expectedReviewRound<1) return sendJson(response,400,{error:'a valid assignedDate and current versions are required'});
+    const result=assignCalendarDate(Number(assignmentMatch[1]),user.id,input);
+    if (result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
+    if (result.error==='wrong-year') return sendJson(response,400,{error:'assigned date must match the puzzle year'});
+    if (result.error) return sendJson(response,409,{error:result.error==='occupied'?'该日期已被其他题目占用':result.error==='not-approved'?'题目尚未取得三票净支持':'题目版本已变化，请刷新后分配',reason:result.error});
+    return sendJson(response,200,result);
+  }
+  const penpaAuditMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/penpa-audits$/);
+  if (penpaAuditMatch&&request.method==='POST') {
+    const input=await readJson(request);
+    if (!['approve','reject'].includes(input.decision)||!Number.isSafeInteger(input.revision)||input.revision<1||!validText(input.guidelinesRevision,64,true)||!validText(input.suggestion??'',2000)) return sendJson(response,400,{error:'invalid Penpa audit fields'});
+    const result=submitCalendarPenpaAudit(Number(penpaAuditMatch[1]),user.id,{...input,suggestion:(input.suggestion||'').trim()});
+    if (result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
+    if (result.error) return sendJson(response,['guidelines-missing','incomplete'].includes(result.error)?400:409,{error:result.error==='incomplete'?'请补齐或明确忽略缺少的 Penpa 链接后再审计':result.error==='rejected'?'制图审计已被打回，请先修改 Penpa 链接':result.error==='guidelines-missing'?'制图规范正文尚未提供':'制图版本或题目状态已变化，请刷新后重新审核',reason:result.error});
+    return sendJson(response,200,result);
+  }
+  const calendarComments=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/comments$/);
+  if (calendarComments&&request.method==='GET') {
+    const result=getCalendarComments(Number(calendarComments[1]),user.id,new URL(request.url,'http://localhost').searchParams.get('reveal')==='1');
+    return result.error?sendJson(response,404,{error:'puzzle not found'}):sendJson(response,200,result);
+  }
+  if (calendarComments&&request.method==='POST') {
+    const input=await readJson(request);
+    if (!validText(input.body,2000,true)) return sendJson(response,400,{error:'comment must be 1 to 2000 characters'});
+    const result=addCalendarComment(Number(calendarComments[1]),user.id,input.body.trim());
+    return result.error?sendJson(response,404,{error:'puzzle not found'}):sendJson(response,201,result);
   }
   const calendarRating=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/complete-rating$/);
   if (request.method==='POST' && calendarRating) {
@@ -342,7 +385,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if(result.error==='reentry-required') return sendJson(response,409,{error:'puzzle needs explicit reentry before another review round'});
     if(result.error==='veto-locked') return sendJson(response,409,{error:'a veto is final for this review round'});
     if(result.error) return sendJson(response,401,{error:'active member session required'});
-    return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
+    return sendJson(response,200,{puzzle:result.puzzle});
   }
   const calendarReenter=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/reenter$/);
   if(request.method==='POST'&&calendarReenter){
@@ -352,7 +395,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if(result.error==='missing') return sendJson(response,404,{error:'puzzle not found'});
     if(result.error==='stale-round') return sendJson(response,409,{error:'review round changed; reload before reentry'});
     if(result.error==='not-leftover') return sendJson(response,409,{error:'only leftover puzzles can be reentered'});
-    return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
+    return sendJson(response,200,{puzzle:result.puzzle});
   }
   const calendarTag=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/tags$/);
   if (request.method==='POST' && calendarTag) {
@@ -362,6 +405,19 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   }
   if (request.method==='PATCH' && calendarMatch) {
     const number=Number(calendarMatch[1]), input=await readJson(request);
+    if (['title','url','clearReviews','penpaEditUrl','penpaSolveUrl','puzzlinkUrl'].some((field)=>Object.hasOwn(input,field))) {
+      const current=getCalendarPuzzle(number,user.id);
+      if (!current) return sendJson(response,404,{error:'puzzle not found'});
+      if (!validText(input.title??current.title,200,true)||(input.url!==undefined&&!validText(input.url,4096))||(input.clearReviews!==undefined&&typeof input.clearReviews!=='boolean')
+        ||!Number.isSafeInteger(input.expectedEditVersion)||input.expectedEditVersion<1
+        ||!Number.isSafeInteger(input.expectedReviewRound)||input.expectedReviewRound<1) return sendJson(response,400,{error:'invalid puzzle edit fields'});
+      const links=normalizeCalendarLinks({...input,inputMode:current.inputMode},current);
+      if (links.error||(current.inputMode==='external'&&!links.value.url)) return sendJson(response,400,{error:links.error||'a solver link is required'});
+      const result=updateCalendarPuzzle(number,user.id,{...input,...links.value,title:input.title??current.title,source:current.inputMode==='blank'?current.source:getPuzzleSource(links.value.url)});
+      if (result.error==='forbidden') return sendJson(response,403,{error:'only the uploader may edit the puzzle'});
+      if (result.error) return sendJson(response,409,{error:'puzzle changed; reload before editing'});
+      return sendJson(response,200,{puzzle:result.puzzle});
+    }
     if (!Object.hasOwn(input,'suggestedDate')&&!Object.hasOwn(input,'suggestedMonthDay')&&!Object.hasOwn(input,'calendarYear')) return sendJson(response,400,{error:'calendarYear or suggestedMonthDay is required'});
     const currentPuzzle=getCalendarPuzzle(number,user.id);
     if(!currentPuzzle) return sendJson(response,404,{error:'puzzle not found'});
@@ -373,7 +429,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     const result=updateCalendarSuggestedDate(number,user.id,dateFields.value.calendarYear,dateFields.value.suggestedDate);
     if (result.missing) return sendJson(response,404,{error:'puzzle not found'});
     if (result.forbidden) return sendJson(response,403,{error:'only the uploader may change suggestedDate'});
-    return sendJson(response,200,{puzzle:result.puzzle,puzzles:getCalendarPuzzles(user.id)});
+    return sendJson(response,200,{puzzle:result.puzzle});
   }
   if (request.method==='DELETE' && calendarMatch) {
     const number=Number(calendarMatch[1]);
