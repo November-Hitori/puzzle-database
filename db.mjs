@@ -617,25 +617,26 @@ function contentForRule(rule,item) {
   if (item==='description') return {rulesZh:rule.rulesZh,rulesEn:rule.rulesEn,isVariant:rule.isVariant,baseRuleId:rule.baseRuleId};
   return {exampleUrl:rule.exampleUrl,exampleAuthor:rule.exampleAuthor??''};
 }
-function attachRuleQuality(rule,userId) {
+function attachRuleQuality(rule,userId,qualityData=null) {
   if (!rule) return null;
-  rule.errorIgnores=getErrorIgnores('rule',rule.id);
+  rule.errorIgnores=qualityData?qualityData.errorIgnores.get(rule.id)||[]:getErrorIgnores('rule',rule.id);
   const errors=getRuleFieldErrors(rule);
   const {baseRuleValid: _baseRuleValid,...publicRule}=rule;
   const fieldNames={name:'名称',description:'说明',example:'例题'};
   const groups={};
   for (const item of RULE_AUDIT_ITEMS) {
     const revision=rule.revisions[item];
-    const currentReviews=database.prepare(`SELECT v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
+    const key=`${rule.id}:${item}`;
+    const currentReviews=(qualityData?qualityData.currentReviews.get(key)||[]:database.prepare(`SELECT v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
         (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
       FROM rule_item_votes v JOIN trusted_users u ON u.id=v.user_id
-      WHERE v.rule_id=? AND v.item=? AND v.revision=? ORDER BY v.created_at,v.user_id`).all(rule.id,item,revision).map((review)=>({...review,active:Boolean(review.active)}));
-    const history=database.prepare(`SELECT e.user_id AS userId,u.name,u.username,e.revision,e.decision,e.suggestion,e.created_at AS createdAt
+      WHERE v.rule_id=? AND v.item=? AND v.revision=? ORDER BY v.created_at,v.user_id`).all(rule.id,item,revision)).map((review)=>({...review,active:Boolean(review.active)}));
+    const history=qualityData?qualityData.history.get(key)||[]:database.prepare(`SELECT e.user_id AS userId,u.name,u.username,e.revision,e.decision,e.suggestion,e.created_at AS createdAt
       FROM rule_item_audit_events e JOIN trusted_users u ON u.id=e.user_id
       WHERE e.rule_id=? AND e.item=? ORDER BY e.id`).all(rule.id,item);
-    const revisions=database.prepare(`SELECT r.revision,r.content_json AS content,r.changed_by_user_id AS changedByUserId,u.name AS changedByName,u.username AS changedByUsername,r.created_at AS createdAt
+    const revisions=(qualityData?qualityData.revisions.get(key)||[]:database.prepare(`SELECT r.revision,r.content_json AS content,r.changed_by_user_id AS changedByUserId,u.name AS changedByName,u.username AS changedByUsername,r.created_at AS createdAt
       FROM rule_item_revisions r LEFT JOIN trusted_users u ON u.id=r.changed_by_user_id
-      WHERE r.rule_id=? AND r.item=? ORDER BY r.revision`).all(rule.id,item).map((row)=>({
+      WHERE r.rule_id=? AND r.item=? ORDER BY r.revision`).all(rule.id,item)).map((row)=>({
       revision:row.revision,content:(()=>{const content=JSON.parse(row.content);if(item==='example'&&!Object.hasOwn(content,'exampleAuthor'))content.exampleAuthor='';return content;})(),
         changedBy:row.changedByUserId?{userId:row.changedByUserId,name:row.changedByName,username:row.changedByUsername}:null,
         createdAt:row.createdAt
@@ -658,15 +659,48 @@ function attachRuleQuality(rule,userId) {
   }
   return {...publicRule,quality:{errors:annotateQualityErrors(errors,rule.errorIgnores),warnings,groups}};
 }
-function selectRule(id) {
-  return ruleFromRow(database.prepare(`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en,
+const ruleSelectSql=`SELECT r.*, b.title_zh AS base_title_zh, b.title_en AS base_title_en,
       CASE WHEN r.is_variant=0 THEN 1 WHEN b.id IS NOT NULL AND b.is_variant=0 AND b.id<>r.id THEN 1 ELSE 0 END AS base_rule_valid,
       creator.name AS creator_name,creator.username AS creator_username
     FROM rules r LEFT JOIN rules b ON b.id = r.base_rule_id
-    LEFT JOIN trusted_users creator ON creator.id=r.creator_user_id WHERE r.id = ?`).get(id));
+    LEFT JOIN trusted_users creator ON creator.id=r.creator_user_id`;
+function selectRule(id) {
+  return ruleFromRow(database.prepare(`${ruleSelectSql} WHERE r.id = ?`).get(id));
+}
+function groupRuleQualityRows(rows) {
+  const groups=new Map();
+  for(const {ruleId,item,...row} of rows) {
+    const key=`${ruleId}:${item}`;
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(row);
+  }
+  return groups;
 }
 export function getRules(userId=null) {
-  return database.prepare('SELECT id FROM rules ORDER BY id').all().map(({id})=>attachRuleQuality(selectRule(id),userId));
+  const rules=database.prepare(`${ruleSelectSql} ORDER BY r.id`).all().map(ruleFromRow);
+  if(!rules.length) return [];
+  const errorIgnores=new Map(rules.map((rule)=>[rule.id,[]]));
+  for(const {ruleId,...ignore} of database.prepare(`SELECT i.entity_id AS ruleId,i.error_key AS key,i.revision,i.reason,i.created_at AS createdAt,
+      i.entity_type AS entityType,u.id AS userId,u.name,u.username
+    FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
+    WHERE i.entity_type='rule' ORDER BY i.entity_id,i.error_key`).all()) {
+    errorIgnores.get(ruleId)?.push(ignore);
+  }
+  const qualityData={
+    errorIgnores,
+    currentReviews:groupRuleQualityRows(database.prepare(`SELECT v.rule_id AS ruleId,v.item,v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
+        (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
+      FROM rule_item_votes v JOIN trusted_users u ON u.id=v.user_id JOIN rules r ON r.id=v.rule_id
+      WHERE v.revision=CASE v.item WHEN 'name' THEN r.name_revision WHEN 'description' THEN r.description_revision WHEN 'example' THEN r.example_revision END
+      ORDER BY v.rule_id,v.item,v.created_at,v.user_id`).all()),
+    history:groupRuleQualityRows(database.prepare(`SELECT e.rule_id AS ruleId,e.item,e.user_id AS userId,u.name,u.username,e.revision,e.decision,e.suggestion,e.created_at AS createdAt
+      FROM rule_item_audit_events e JOIN trusted_users u ON u.id=e.user_id
+      ORDER BY e.rule_id,e.item,e.id`).all()),
+    revisions:groupRuleQualityRows(database.prepare(`SELECT r.rule_id AS ruleId,r.item,r.revision,r.content_json AS content,r.changed_by_user_id AS changedByUserId,u.name AS changedByName,u.username AS changedByUsername,r.created_at AS createdAt
+      FROM rule_item_revisions r LEFT JOIN trusted_users u ON u.id=r.changed_by_user_id
+      ORDER BY r.rule_id,r.item,r.revision`).all())
+  };
+  return rules.map((rule)=>attachRuleQuality(rule,userId,qualityData));
 }
 export function getRule(id,userId=null) { return attachRuleQuality(selectRule(id),userId); }
 export function ruleHasVariants(id) { return Boolean(database.prepare('SELECT 1 FROM rules WHERE base_rule_id=? LIMIT 1').get(id)); }
