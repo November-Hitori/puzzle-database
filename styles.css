@@ -330,10 +330,25 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .form-help { display: block; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .calendar-row-review { color: var(--muted); }
 .calendar-review-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 20px 0; padding: 15px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
-.calendar-review-panel div { display: grid; gap: 5px; min-width: 0; }
-.calendar-review-panel span { color: var(--muted); font-size: 10px; }
-.calendar-review-panel strong { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.calendar-review-panel p { grid-column: 1 / -1; margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.calendar-review-stat { display: grid; gap: 5px; min-width: 0; }
+.calendar-review-stat > span { color: var(--muted); font-size: 10px; }
+.calendar-review-stat > strong { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.calendar-personal-evaluation { grid-column: 1 / -1; margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.calendar-participant-section, .calendar-review-history { grid-column: 1 / -1; min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.calendar-participant-section h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; }
+.participant-list { display: grid; gap: 9px; margin: 0; }
+.participant-row { display: grid; grid-template-columns: 125px minmax(0, 1fr); align-items: baseline; gap: 12px; }
+.participant-row dt { color: var(--muted); font-size: 10px; line-height: 1.7; }
+.participant-row dd { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; margin: 0; }
+.participant-name { max-width: 100%; padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink-soft); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.participant-empty { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.calendar-participant-section .rating-participants { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.record-panel .rating-participants { margin-top: 15px; }
+.record-panel .participant-row { grid-template-columns: 1fr; gap: 5px; }
+.calendar-review-history > summary { cursor: pointer; color: var(--ink-soft); font-size: 11px; }
+.calendar-review-history > ol { display: grid; gap: 14px; margin: 14px 0 0; padding-left: 22px; }
+.calendar-review-history li > strong { display: block; font-size: 12px; line-height: 1.5; }
+.calendar-review-history-summary { display: block; margin: 5px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.7; }
 .calendar-evaluation-fieldset { min-width: 0; margin: 15px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 5px; }
 .calendar-evaluation-fieldset legend { padding: 0 5px; color: var(--ink); font-size: 11px; font-weight: 600; }
 .difficulty-options, .calendar-tag-options, .calendar-vote-options { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -364,7 +379,7 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
   .calendar-date-fields { grid-template-columns: 1fr 1fr; }
   .calendar-date-fields label:first-child { grid-column: 1 / -1; }
   .calendar-review-panel { grid-template-columns: 1fr; }
-  .calendar-review-panel p { grid-column: auto; }
+  .calendar-personal-evaluation { grid-column: auto; }
   .inbox-item { flex-direction: column; }
   .inbox-item-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
 }

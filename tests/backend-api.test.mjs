@@ -42,6 +42,23 @@ process.env.PUZARCHIVE_USERS_PATH=usersPath;
 const {createServer}=await import('../server.mjs');
 const {authBootstrapComplete,bootstrapLegacyAuth,database,findSession,getRule,setRegistrationGate}=await import('../db.mjs');
 
+function assertParticipants(actual,expected) {
+  assert.ok(Array.isArray(actual));
+  const byUsername=(a,b)=>String(a.username).localeCompare(String(b.username));
+  assert.deepEqual([...actual].sort(byUsername),[...expected].sort(byUsername));
+}
+
+function assertReviewParticipants(review,expected={}) {
+  const votes=['support','oppose','veto'];
+  assert.deepEqual(Object.keys(review.participants).sort(),[...votes].sort());
+  for (const vote of votes) {
+    assertParticipants(review.participants[vote],expected[vote]||[]);
+    assert.equal(review.participants[vote].length,review[vote]);
+  }
+  const people=votes.flatMap((vote)=>review.participants[vote]);
+  assert.equal(new Set(people.map((person)=>person.username)).size,people.length);
+}
+
 test('fresh database seed assigns unique delete tokens before puzzle seeding',()=>{
   const isolated=fs.mkdtempSync(path.join(os.tmpdir(),'puzarchive-fresh-db-'));
   try {
@@ -151,6 +168,9 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(created.response.status,201);
   const number=created.body.puzzle.number;
   assert.equal(created.body.puzzle.scope,'calendar');
+  assertParticipants(created.body.puzzle.ratingParticipants,[]);
+  assertReviewParticipants(created.body.puzzle.review);
+  assertReviewParticipants(created.body.puzzle.reviewHistory[0]);
   assert.ok(created.body.puzzle.deleteToken);
   assert.equal(created.body.puzzle.rule.titleEn,'Fillomino');
   assert.deepEqual(created.body.puzzle.submittedBy,{id:'trusted-1',name:'Ada',username:'Ada'});
@@ -161,6 +181,7 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.deepEqual(referencedRuleDelete.body.references,{publicPuzzles:0,calendarPuzzles:1,otherPuzzles:0,totalPuzzles:1,variants:1});
   const legacyList=await request('/api/puzzles',{},ada);
   assert.deepEqual(legacyList.body.puzzles.map((p)=>p.number),[777]);
+  assertParticipants(legacyList.body.puzzles[0].ratingParticipants,[]);
   assert.equal((await request('/api/tags',{},ada)).body.tags.length,0);
   assert.equal((await request('/api/calendar/puzzles',{},ada)).body.puzzles.length,2);
   assert.equal((await request(`/api/puzzles/${number}/complete-rating`,{method:'POST',body:JSON.stringify({logic:5,intuition:4,enjoyment:5})},ada)).response.status,404);
@@ -184,6 +205,9 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(cyRegistration.response.status,201);
   assert.equal(danRegistration.response.status,201);
   const bea=beaRegistration.cookie,cy=cyRegistration.cookie,dan=danRegistration.cookie;
+  const publicIdentity=(user)=>({name:user.name,username:user.username});
+  const adaPerson=publicIdentity(adaRegistration.body.user),linPerson=publicIdentity(linRegistration.body.user),
+    beaPerson=publicIdentity(beaRegistration.body.user),cyPerson=publicIdentity(cyRegistration.body.user),danPerson=publicIdentity(danRegistration.body.user);
   const forbidden=await request(`/api/calendar/puzzles/${number}`,{method:'PATCH',body:JSON.stringify({suggestedDate:'2026-01-01'})},lin);
   assert.equal(forbidden.response.status,403);
   const review={difficulty:3,tags:['逻辑通顺'],vote:'support',expectedReviewRound:1};
@@ -194,12 +218,16 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.deepEqual(rateUpdate.body.puzzle.ratings,[0,0,0]);
   assert.equal(rateUpdate.body.puzzle.evaluation.difficulty,1);
   assert.deepEqual(rateUpdate.body.puzzle.evaluation.tags,['美观']);
+  assertParticipants(rateUpdate.body.puzzle.ratingParticipants,[linPerson]);
+  assertReviewParticipants(rateUpdate.body.puzzle.review,{support:[linPerson]});
   const linCalendar=await request('/api/calendar/puzzles',{},lin);
   const adaCalendar=await request('/api/calendar/puzzles',{},ada);
   assert.equal(linCalendar.body.puzzles[0].completed,true);
   assert.equal(linCalendar.body.puzzles[0].evaluation.difficulty,1);
   assert.equal(adaCalendar.body.puzzles[0].completed,false);
   assert.equal(adaCalendar.body.puzzles[0].evaluation,null);
+  assertParticipants(adaCalendar.body.puzzles[0].ratingParticipants,[linPerson]);
+  assertReviewParticipants(adaCalendar.body.puzzles[0].review,{support:[linPerson]});
 
   const defaultYearPuzzle=await request('/api/calendar/puzzles',{method:'POST',body:JSON.stringify({title:'No date yet',source:'Fill-in',inputMode:'blank',ruleId:original.body.rule.id,submittedBy:{id:'forged'}})},ada);
   assert.equal(defaultYearPuzzle.response.status,201);
@@ -208,6 +236,8 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(defaultYearPuzzle.body.puzzle.suggestedMonthDay,'');
   assert.equal(defaultYearPuzzle.body.puzzle.author,'Ada');
   assert.equal(defaultYearPuzzle.body.puzzle.submittedBy.id,'trusted-1');
+  assert.equal((await request(`/api/calendar/puzzles/${newCalendarNumber}`)).response.status,401);
+  assert.equal((await request('/api/calendar/leftovers')).response.status,401);
   const reviewFor=(vote,difficulty=4)=>({difficulty,tags:['逻辑通顺','美观'],vote,expectedReviewRound:1,userId:'forged-reviewer'});
   const invalidScore=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('support',7))},ada);
   assert.equal(invalidScore.response.status,400);
@@ -223,11 +253,18 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(latest.completed,true);
   assert.deepEqual(latest.reviewHistory.map((round)=>round.reviewRound),[1]);
   assert.equal(latest.reviewHistory[0].evaluationCount,5);
+  const allEvaluators=[adaPerson,linPerson,beaPerson,cyPerson,danPerson];
+  const initialVotes={support:[adaPerson,linPerson,beaPerson,cyPerson],oppose:[danPerson]};
+  assertParticipants(latest.ratingParticipants,allEvaluators);
+  assertReviewParticipants(latest.review,initialVotes);
+  assertReviewParticipants(latest.reviewHistory[0],initialVotes);
   database.prepare('UPDATE trusted_users SET is_active=0 WHERE username=?').run('Dan');
   latest=(await request(`/api/calendar/puzzles/${newCalendarNumber}`,{},ada)).body.puzzle;
   assert.equal(latest.review.oppose,1);
   assert.equal(Object.hasOwn(latest.review,'neutral'),false);
   assert.equal(latest.reviewHistory[0].evaluationCount,5);
+  assertParticipants(latest.ratingParticipants,allEvaluators);
+  assertReviewParticipants(latest.review,initialVotes);
   database.prepare('UPDATE trusted_users SET is_active=1 WHERE username=?').run('Dan');
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM calendar_review_votes WHERE user_id='forged-reviewer'").get().count,0);
   let inbox=(await request('/api/inbox?limit=50',{},ada)).body;
@@ -236,16 +273,22 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   const boundary=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('oppose'))},dan);
   assert.equal(boundary.body.puzzle.calendarStatus,'approved');
   assert.equal(boundary.body.puzzle.review.netSupport,3);
+  assertReviewParticipants(boundary.body.puzzle.review,{support:[adaPerson,linPerson,beaPerson,cyPerson],oppose:[danPerson]});
   const voteDown=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('oppose'))},cy);
   assert.equal(voteDown.response.status,200);
   assert.equal(voteDown.body.puzzle.calendarStatus,'pending');
+  assertReviewParticipants(voteDown.body.puzzle.review,{support:[adaPerson,linPerson,beaPerson],oppose:[cyPerson,danPerson]});
   const reapprove=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('support'))},cy);
   assert.equal(reapprove.body.puzzle.calendarStatus,'approved');
+  assertReviewParticipants(reapprove.body.puzzle.review,{support:[adaPerson,linPerson,beaPerson,cyPerson],oppose:[danPerson]});
   inbox=(await request('/api/inbox?limit=50',{},ada)).body;
   assert.equal(inbox.notifications.filter((item)=>item.type==='calendar-approved'&&item.entity.id===latest.number).length,2);
   const veto=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('veto'))},dan);
   assert.equal(veto.response.status,200);
   assert.equal(veto.body.puzzle.calendarStatus,'leftover');
+  const firstRoundVotes={support:[adaPerson,linPerson,beaPerson,cyPerson],veto:[danPerson]};
+  assertReviewParticipants(veto.body.puzzle.review,firstRoundVotes);
+  assertReviewParticipants(veto.body.puzzle.reviewHistory[0],firstRoundVotes);
   assert.equal((await request('/api/calendar/puzzles',{},ada)).body.puzzles.some((item)=>item.number===newCalendarNumber),false);
   assert.equal((await request('/api/calendar/leftovers',{},ada)).body.puzzles.some((item)=>item.number===newCalendarNumber),true);
   assert.equal((await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('support'))},lin)).response.status,409);
@@ -259,6 +302,10 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(reentered.body.puzzle.reviewHistory.length,2);
   assert.equal(reentered.body.puzzle.reviewHistory[0].evaluationCount,5);
   assert.equal(reentered.body.puzzle.reviewHistory[1].evaluationCount,0);
+  assertParticipants(reentered.body.puzzle.ratingParticipants,allEvaluators);
+  assertReviewParticipants(reentered.body.puzzle.review);
+  assertReviewParticipants(reentered.body.puzzle.reviewHistory[0],firstRoundVotes);
+  assertReviewParticipants(reentered.body.puzzle.reviewHistory[1]);
   const staleRound=await request(`/api/calendar/puzzles/${newCalendarNumber}/complete-rating`,{method:'POST',body:JSON.stringify(reviewFor('support'))},lin);
   assert.equal(staleRound.response.status,409);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM calendar_review_vote_events WHERE puzzle_id=(SELECT id FROM puzzles WHERE number=?)').get(newCalendarNumber).count,eventsBeforeReentry);
@@ -272,6 +319,11 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(latest.evaluationSummary.averageDifficulty,3.6);
   assert.equal(latest.reviewHistory[0].averageDifficulty,4);
   assert.equal(latest.reviewHistory[1].averageDifficulty,3.3);
+  assert.equal(latest.votes,5);
+  assertParticipants(latest.ratingParticipants,allEvaluators);
+  assertReviewParticipants(latest.review,{support:[adaPerson,linPerson,beaPerson]});
+  assertReviewParticipants(latest.reviewHistory[0],firstRoundVotes);
+  assertReviewParticipants(latest.reviewHistory[1],{support:[adaPerson,linPerson,beaPerson]});
   const inboxItem=inbox.notifications.find((item)=>item.type==='calendar-approved'&&item.entity.id===latest.number);
   assert.ok(inboxItem);
   const readOne=await request(`/api/inbox/${inboxItem.id}/read`,{method:'POST',body:JSON.stringify({recipientUserId:'forged'})},lin);
@@ -310,6 +362,36 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal((await request(`/api/calendar/puzzles/${replacement.body.puzzle.number}`,{method:'DELETE',body:JSON.stringify({deleteToken:replacement.body.puzzle.deleteToken})},ada)).response.status,200);
   const publicReference=await request('/api/puzzles',{method:'POST',body:JSON.stringify({title:'Legacy public reference',author:'Ada',source:'fixture',inputMode:'blank',ruleId:original.body.rule.id,answer:'x'})},ada);
   assert.equal(publicReference.response.status,201);
+  const publicNumber=publicReference.body.puzzles.find((puzzle)=>puzzle.title==='Legacy public reference').number;
+  const publicRating={logic:5,intuition:4,enjoyment:3};
+  for (const cookie of [ada,lin]) {
+    const rated=await request(`/api/puzzles/${publicNumber}/complete-rating`,{method:'POST',body:JSON.stringify(publicRating)},cookie);
+    assert.equal(rated.response.status,200);
+  }
+  const publicUpdated=await request(`/api/puzzles/${publicNumber}/complete-rating`,{method:'POST',body:JSON.stringify({...publicRating,logic:1})},ada);
+  assert.equal(publicUpdated.response.status,200);
+  const publicPuzzle=publicUpdated.body.puzzles.find((puzzle)=>puzzle.number===publicNumber);
+  assert.equal(publicPuzzle.votes,2);
+  assert.deepEqual(publicPuzzle.ratings,[3,4,3]);
+  assertParticipants(publicPuzzle.ratingParticipants,[adaPerson,linPerson]);
+  const publicObserver=(await request('/api/puzzles',{},bea)).body.puzzles.find((puzzle)=>puzzle.number===publicNumber);
+  assert.equal(publicObserver.completed,false);
+  assertParticipants(publicObserver.ratingParticipants,[adaPerson,linPerson]);
+  const publicPuzzleId=database.prepare('SELECT id FROM puzzles WHERE number=?').get(publicNumber).id;
+  const addLegacyRating=database.prepare('INSERT INTO puzzle_ratings(puzzle_id,user_id,logic,intuition,enjoyment) VALUES(?,?,3,3,3)');
+  addLegacyRating.run(publicPuzzleId,'removed-user');
+  addLegacyRating.run(publicPuzzleId,'unknown-past-reviewer');
+  const withLegacyRatings=(await request('/api/puzzles',{},bea)).body.puzzles.find((puzzle)=>puzzle.number===publicNumber);
+  assert.equal(withLegacyRatings.votes,4);
+  assertParticipants(withLegacyRatings.ratingParticipants,[adaPerson,linPerson,{name:'Removed Member',username:null},{name:'未知用户',username:null}]);
+  const legacyCalendarId=database.prepare('SELECT id FROM puzzles WHERE number=776').get().id;
+  database.prepare('INSERT INTO calendar_evaluations(puzzle_id,user_id,review_round,difficulty,tags_json) VALUES(?,?,1,3,?)').run(legacyCalendarId,'unknown-past-reviewer','[]');
+  database.prepare('INSERT INTO calendar_review_votes(puzzle_id,user_id,review_round,vote) VALUES(?,?,1,?)').run(legacyCalendarId,'unknown-past-reviewer','oppose');
+  const legacyParticipants=(await request('/api/calendar/puzzles/776',{},ada)).body.puzzle;
+  assert.equal(legacyParticipants.votes,2);
+  assertParticipants(legacyParticipants.ratingParticipants,[adaPerson,{name:'未知用户',username:null}]);
+  assertReviewParticipants(legacyParticipants.review,{oppose:[{name:'未知用户',username:null}]});
+  assertReviewParticipants(legacyParticipants.reviewHistory[0],{oppose:[{name:'未知用户',username:null}]});
   const publicReferenceDelete=await request(`/api/rules/${original.body.rule.id}`,{method:'DELETE',body:JSON.stringify({deleteToken:original.body.rule.deleteToken,expectedEditVersion:original.body.rule.editVersion})},ada);
   assert.equal(publicReferenceDelete.response.status,409);
   assert.deepEqual(publicReferenceDelete.body.references,{publicPuzzles:1,calendarPuzzles:0,otherPuzzles:0,totalPuzzles:1,variants:1});

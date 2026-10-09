@@ -432,6 +432,14 @@ function allocateEntityId(name) {
   return next;
 }
 
+function participantIdentity(row) {
+  return {name:row.name||'未知用户',username:row.username||null};
+}
+
+function emptyReviewParticipants() {
+  return {support:[],oppose:[],veto:[]};
+}
+
 export function getPuzzles(userId = 'demo-user') {
   const rows = database.prepare(`
     SELECT p.*,
@@ -447,6 +455,15 @@ export function getPuzzles(userId = 'demo-user') {
     WHERE p.scope = 'public'
     GROUP BY p.id ORDER BY p.number DESC
   `).all(userId, userId);
+  const ratingParticipants=new Map();
+  for(const participant of database.prepare(`SELECT r.puzzle_id,u.name,u.username
+    FROM puzzle_ratings r JOIN puzzles p ON p.id=r.puzzle_id
+    LEFT JOIN trusted_users u ON u.id=r.user_id
+    WHERE p.scope='public'
+    ORDER BY r.puzzle_id,COALESCE(u.name,'未知用户') COLLATE NOCASE,COALESCE(u.username,'') COLLATE NOCASE,r.user_id`).all()) {
+    if(!ratingParticipants.has(participant.puzzle_id)) ratingParticipants.set(participant.puzzle_id,[]);
+    ratingParticipants.get(participant.puzzle_id).push(participantIdentity(participant));
+  }
   return rows.map((row) => ({
     number: row.number,
     title: row.title,
@@ -461,6 +478,7 @@ export function getPuzzles(userId = 'demo-user') {
     completed: Boolean(row.completed),
     ratings: [Number(row.logic_rating), Number(row.intuition_rating), Number(row.enjoyment_rating)],
     votes: Number(row.votes),
+    ratingParticipants: ratingParticipants.get(row.id)||[],
     userRating: row.user_rating ? (() => { const value = JSON.parse(row.user_rating); return [value.logic, value.intuition, value.enjoyment]; })() : null,
     tags: JSON.parse(row.tags || JSON.stringify([row.input_mode === 'blank' ? '填空题' : row.type]))
   }));
@@ -840,21 +858,30 @@ function puzzleByNumber(number, userId, scope, context=null) {
     puzzle.puzzlinkUrl=row.puzzlink_url;
     puzzle.penpaRevision=Number(row.penpa_revision);
     puzzle.assignedDate=row.assigned_date;
-    const evaluations=database.prepare(`SELECT e.difficulty,e.tags_json,e.review_round FROM calendar_evaluations e
+    const evaluations=database.prepare(`SELECT e.difficulty,e.tags_json,e.review_round,u.name,u.username FROM calendar_evaluations e
       JOIN (SELECT user_id,MAX(review_round) AS review_round FROM calendar_evaluations WHERE puzzle_id=? GROUP BY user_id) latest
         ON latest.user_id=e.user_id AND latest.review_round=e.review_round
-      WHERE e.puzzle_id=? ORDER BY e.user_id`).all(row.id,row.id);
+      LEFT JOIN trusted_users u ON u.id=e.user_id
+      WHERE e.puzzle_id=?
+      ORDER BY COALESCE(u.name,'未知用户') COLLATE NOCASE,COALESCE(u.username,'') COLLATE NOCASE,e.user_id`).all(row.id,row.id);
     const ownEvaluation=database.prepare('SELECT difficulty,tags_json FROM calendar_evaluations WHERE puzzle_id=? AND user_id=? ORDER BY review_round DESC LIMIT 1').get(row.id,userId);
     const tagCounts=new Map();
     for(const evaluation of evaluations) for(const tag of JSON.parse(evaluation.tags_json)) tagCounts.set(tag,(tagCounts.get(tag)||0)+1);
-    const review={support:0,oppose:0,veto:0};
-    for(const vote of database.prepare('SELECT vote,COUNT(*) AS count FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? GROUP BY vote').all(row.id,row.review_round)) review[vote.vote]=Number(vote.count);
     const ownVote=database.prepare('SELECT vote FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? AND user_id=?').get(row.id,row.review_round,userId)?.vote||null;
     const voteHistory=new Map();
-    for(const item of database.prepare('SELECT review_round,vote,COUNT(*) AS count FROM calendar_review_votes WHERE puzzle_id=? GROUP BY review_round,vote').all(row.id)) {
-      if(!voteHistory.has(item.review_round)) voteHistory.set(item.review_round,{support:0,oppose:0,veto:0});
-      voteHistory.get(item.review_round)[item.vote]=Number(item.count);
+    const participantHistory=new Map();
+    for(const item of database.prepare(`SELECT v.review_round,v.vote,u.name,u.username
+      FROM calendar_review_votes v LEFT JOIN trusted_users u ON u.id=v.user_id
+      WHERE v.puzzle_id=?
+      ORDER BY v.review_round,COALESCE(u.name,'未知用户') COLLATE NOCASE,COALESCE(u.username,'') COLLATE NOCASE,v.user_id`).all(row.id)) {
+      if(!voteHistory.has(item.review_round)) {
+        voteHistory.set(item.review_round,{support:0,oppose:0,veto:0});
+        participantHistory.set(item.review_round,emptyReviewParticipants());
+      }
+      voteHistory.get(item.review_round)[item.vote]++;
+      participantHistory.get(item.review_round)[item.vote].push(participantIdentity(item));
     }
+    const review=voteHistory.get(row.review_round)||{support:0,oppose:0,veto:0};
     const evaluationHistory=new Map();
     for(const item of database.prepare('SELECT review_round,COUNT(*) AS count,AVG(difficulty) AS average FROM calendar_evaluations WHERE puzzle_id=? GROUP BY review_round').all(row.id)) {
       evaluationHistory.set(item.review_round,{count:Number(item.count),average:Number(Number(item.average).toFixed(1))});
@@ -862,9 +889,11 @@ function puzzleByNumber(number, userId, scope, context=null) {
     const reviewHistory=Array.from({length:Number(row.review_round)},(_,index)=>{
       const round=index+1,totals=voteHistory.get(round)||{support:0,oppose:0,veto:0},evaluationsForRound=evaluationHistory.get(round)||{count:0,average:null};
       return {reviewRound:round,status:getCalendarReviewStatus(totals),...totals,netSupport:totals.support-totals.oppose,
+        participants:participantHistory.get(round)||emptyReviewParticipants(),
         evaluationCount:evaluationsForRound.count,averageDifficulty:evaluationsForRound.average};
     });
     puzzle.ratings=[0,0,0];puzzle.votes=database.prepare('SELECT COUNT(DISTINCT user_id) AS count FROM calendar_evaluations WHERE puzzle_id=?').get(row.id).count;puzzle.userRating=null;
+    puzzle.ratingParticipants=evaluations.map(participantIdentity);
     puzzle.calendarYear=Number(row.calendar_year);
     puzzle.suggestedDate=row.suggested_date;
     puzzle.suggestedMonthDay=row.suggested_date?row.suggested_date.slice(5):'';
@@ -873,7 +902,7 @@ function puzzleByNumber(number, userId, scope, context=null) {
     puzzle.evaluation=ownEvaluation?{difficulty:Number(ownEvaluation.difficulty),tags:JSON.parse(ownEvaluation.tags_json)}:null;
     puzzle.evaluationSummary={averageDifficulty:evaluations.length?Number((evaluations.reduce((sum,e)=>sum+Number(e.difficulty),0)/evaluations.length).toFixed(1)):null,
       tags:[...tagCounts].map(([tag,count])=>({tag,count})).sort((a,b)=>b.count-a.count||a.tag.localeCompare(b.tag))};
-    puzzle.review={...review,netSupport:review.support-review.oppose};
+    puzzle.review={...review,netSupport:review.support-review.oppose,participants:participantHistory.get(row.review_round)||emptyReviewParticipants()};
     puzzle.reviewHistory=reviewHistory;
     puzzle.userVote=ownVote;
     puzzle.quality=getCalendarQuality(row,rule,context?.guidelines);
