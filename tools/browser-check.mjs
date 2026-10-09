@@ -37,6 +37,10 @@ for (const item of ['name', 'description', 'example']) for (const id of ['review
 const puzzlink = 'https://puzz.link/p?slither/3/3/0000';
 const spoiler = db.addCalendarPuzzle({ title: '剧透与留言检查', author: 'NativeOne', source: 'puzz.link', url: puzzlink, inputMode: 'external', ruleId: standard.id }, { id: 'reviewer-1' }).puzzle;
 db.completeCalendarReview(spoiler.number, 'reviewer-1', { difficulty: 3, tags: [], vote: 'support', expectedReviewRound: 1 });
+db.database.prepare('INSERT INTO trusted_users(id,name) VALUES (?,?)').run('legacy-browser', '<img src=x onerror="window.unsafeParticipant=true">');
+const spoilerId = db.database.prepare('SELECT id FROM puzzles WHERE number=?').get(spoiler.number).id;
+db.database.prepare('INSERT INTO calendar_review_votes(puzzle_id,user_id,review_round,vote) VALUES (?,?,1,?)').run(spoilerId, 'legacy-browser', 'oppose');
+db.database.prepare('INSERT INTO calendar_evaluations(puzzle_id,user_id,review_round,difficulty,tags_json) VALUES (?,?,1,4,?)').run(spoilerId, 'legacy-browser', '[]');
 db.addCalendarComment(spoiler.number, 'reviewer-1', '<script>window.unsafeComment = true</script>\n测试解题思路');
 const server = createServer();
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -100,6 +104,10 @@ try {
   assert.equal(await page.locator(`${row} .spoiler-content`).evaluate((node) => node.hidden), true);
   await page.locator(`${row} .spoiler-toggle`).click(); assert.equal(new URL(page.url()).hash, '#calendar');
   await page.locator(`${row} .calendar-title-link`).click(); await page.locator('#calendarCommentsList').waitFor({ state: 'attached' });
+  assert.ok((await page.locator('.calendar-participant-section').textContent()).includes('NativeOne'));
+  assert.ok((await page.locator('.calendar-participant-section').textContent()).includes('<img src=x'));
+  assert.equal(await page.locator('.calendar-participant-section img').count(), 0);
+  assert.equal(await page.evaluate(() => Boolean(window.unsafeParticipant)), false);
   assert.equal(await page.locator('#calendarCommentsList').evaluate((node) => node.hidden), true);
   await page.locator('#revealCommentsButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('测试解题思路'));
   assert.equal(await page.evaluate(() => Boolean(document.querySelector('#calendarCommentsList script') || window.unsafeComment)), false);
@@ -116,6 +124,17 @@ try {
   assert.equal(await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe')), true);
   assert.equal(requests.slice(reviewStart).filter((entry) => entry.path.endsWith('/complete-rating')).length, 1);
   assert.equal(requests.slice(reviewStart).filter((entry) => ['/api/calendar/puzzles', '/api/calendar/leftovers'].includes(entry.path)).length, 0);
+  assert.ok((await page.locator('.calendar-participant-section .vote-participants').textContent()).includes('BrowserOwner'));
+  const participantFrame = await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe'));
+  await page.locator('#completePuzzleButton').click();
+  await page.locator('label:has(input[name="calendarVote"][value="oppose"])').click();
+  await page.locator('#submitCalendarEvaluationButton').click();
+  await page.locator('#submitCalendarEvaluationButton').waitFor({state: 'detached'});
+  assert.ok((await page.locator('.vote-participants .participant-row').nth(1).textContent()).includes('BrowserOwner'));
+  assert.ok(!(await page.locator('.vote-participants .participant-row').nth(0).textContent()).includes('BrowserOwner'));
+  assert.equal(participantFrame, true);
+  assert.equal(await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe')), true);
+  await screenshot('calendar-participants-browser-desktop.png');
   console.log('PASS: native spoiler controls, safe comments, failed-comment draft, delayed vote and preserved iframe');
 
   await navigate('rules', '.rule-catalog');

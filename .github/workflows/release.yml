@@ -1,0 +1,108 @@
+name: Verify and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tests, browser and release preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
+      - name: Node and Python tests
+        run: |
+          npm test
+          python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Install isolated desktop browser
+        run: |
+          npm install --prefix "$RUNNER_TEMP/browser-driver" --no-audit --no-fund playwright@1.64.0
+          node "$RUNNER_TEMP/browser-driver/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "PUZARCHIVE_PLAYWRIGHT_MODULE=$RUNNER_TEMP/browser-driver/node_modules/playwright/index.mjs" >> "$GITHUB_ENV"
+          executable=$(node --input-type=module -e "import {chromium} from '$RUNNER_TEMP/browser-driver/node_modules/playwright/index.mjs'; console.log(chromium.executablePath());")
+          echo "PUZARCHIVE_BROWSER_EXECUTABLE=$executable" >> "$GITHUB_ENV"
+      - name: Real desktop acceptance
+        run: npm run test:browser
+      - name: Reproducible candidate package and non-root read-only preflight
+        env:
+          PUZARCHIVE_PREFLIGHT_USE_SUDO: 'true'
+        run: |
+          python3 deploy/release_archive.py pack "$RUNNER_TEMP/puzarchive-release.tar"
+          bash deploy/preflight.sh "$RUNNER_TEMP/puzarchive-release.tar" "$(command -v node)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release
+          path: ${{ runner.temp }}/puzarchive-release.tar
+          retention-days: 14
+          if-no-files-found: error
+
+  production:
+    name: Production deployment
+    needs: verify
+    if: github.repository == 'Sigmit64/puzzle-database' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+    concurrency:
+      group: puzarchive-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release
+          path: ${{ runner.temp }}/release
+      - name: Skip an obsolete main commit
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [ "$newest" = "$GITHUB_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer main commit will handle deployment.'
+          fi
+      - name: Deploy verified artifact through restricted SSH command
+        if: steps.freshness.outputs.deploy == 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.PUZARCHIVE_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PUZARCHIVE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY" && test -n "$KNOWN_HOSTS"
+          umask 077
+          mkdir "$RUNNER_TEMP/production-ssh"
+          trap 'rm -rf "$RUNNER_TEMP/production-ssh"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/production-ssh/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/production-ssh/known_hosts"
+          cat > "$RUNNER_TEMP/production-ssh/config" <<EOF
+          Host puzarchive-production
+            HostName 62.234.13.10
+            User ubuntu
+            IdentityFile $RUNNER_TEMP/production-ssh/key
+            UserKnownHostsFile $RUNNER_TEMP/production-ssh/known_hosts
+            StrictHostKeyChecking yes
+            IdentitiesOnly yes
+            BatchMode yes
+            ConnectTimeout 15
+          EOF
+          python3 deploy/release_archive.py verify "$RUNNER_TEMP/release/puzarchive-release.tar" "$GITHUB_SHA"
+          python3 deploy/ci-send.py "$RUNNER_TEMP/release/puzarchive-release.tar" "$RUNNER_TEMP/production-ssh/config"
+      - name: Read-only public HTTPS smoke check
+        if: steps.freshness.outputs.deploy == 'true'
+        run: |
+          test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://62.234.13.10/)" = 200
+          test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://62.234.13.10/api/rules)" = 401
+          test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://62.234.13.10/db.mjs)" = 404
