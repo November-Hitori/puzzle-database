@@ -4,3 +4,6 @@ data/*.sqlite-*
 .env
 .env.*
 !.env.example
+.next/
+out/
+data/next/

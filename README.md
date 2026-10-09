@@ -4,15 +4,19 @@
 
 ## 本地运行
 
-在项目目录执行（数据库模式）：
+在项目目录执行 Next.js 开发环境：
 
 ```powershell
 npm run dev
 ```
 
-然后打开 <http://localhost:4173/>。第一次启动会自动创建 `data/puzarchive.sqlite`，并写入演示题目、评分、完成记录和文件夹。
+然后打开 <http://localhost:4173/>。Next.js 使用独立的 `data/next/puzarchive.sqlite`，不会修改旧版数据库。
 
-也可以使用任意静态文件服务器运行 `index.html`；这种方式不会连接数据库，前端会回退到浏览器 `localStorage` 演示模式。
+旧版 Node 服务仍可单独运行：
+
+```powershell
+npm run dev:legacy
+```
 
 ## 当前数据库接入
 
