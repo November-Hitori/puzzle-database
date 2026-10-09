@@ -6,9 +6,17 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "dev:next": "next dev -p 4173",
+    "build:next": "next build",
+    "start:next": "next start -p 4173"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "next": "^16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   }
 }
