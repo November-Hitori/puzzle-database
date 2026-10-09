@@ -61,6 +61,7 @@ PYTHON
 rollback_on_error() {
   local status=$?
   trap - ERR
+  trap '' HUP INT TERM
   if [ "$stopped" = 1 ]; then
     systemctl stop puzarchive || true
     if [ "$swapped" = 1 ]; then exchange; fi
@@ -83,8 +84,10 @@ mapfile -t baseline_dirs < <(find "$final_backup_root" -mindepth 1 -maxdepth 1 -
 test "${#baseline_dirs[@]}" = 1
 baseline="${baseline_dirs[0]}"
 sudo -u puzarchive "$runtime" "$app/deploy/restore-check.mjs" "$baseline"
+trap '' HUP INT TERM
 exchange
 swapped=1
+trap 'false' HUP INT TERM
 systemctl start puzarchive
 for attempt in $(seq 1 30); do
   if curl -fsS --max-time 2 http://127.0.0.1:4173/ -o /dev/null 2>/dev/null; then break; fi
@@ -98,10 +101,13 @@ sudo -u puzarchive "$runtime" "$helpers/preservation-check.mjs" "$baseline" /var
 test "$(sha256sum /etc/puzarchive/puzarchive.env | cut -d ' ' -f 1)" = "$env_before"
 test "$(sha256sum /var/lib/puzarchive/trusted-users.json | cut -d ' ' -f 1)" = "$members_before"
 cp "$app/.release.json" "$metadata/manifest.json"
-mv "$stage/app" "$rollback/app-before"
+# All checks passed: finish the transaction before moving its old-code directory.
+# A signal cannot request an exchange after that source directory is archived.
+trap - ERR
+trap '' HUP INT TERM
 swapped=0
 stopped=0
-trap - ERR
+mv "$stage/app" "$rollback/app-before"
 echo "deployed_commit=$commit"
 echo 'service_active=true'
 echo 'loopback_home_http=200'
