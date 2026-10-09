@@ -68,3 +68,18 @@ npm test
 - 使用 Next.js 或其他正式应用框架拆分页面和组件
 - 将 SQLite 迁移到 PostgreSQL 与 ORM（需要多人部署或生产环境时）
 - 增加账号密码恢复流程
+
+## Next.js preview
+
+Next.js migration files are available in `app/`, `components/`, and `lib/`. The legacy Node service remains the default entry point.
+
+```powershell
+npm run dev:next
+```
+
+Then open <http://localhost:4173/>. The Next preview uses its own database at `data/next/puzarchive.sqlite` and does not modify the legacy database.
+
+```powershell
+npm run build:next
+npm run start:next
+```

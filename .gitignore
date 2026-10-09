@@ -7,3 +7,6 @@ data/trusted-users.json
 !.env.example
 __pycache__/
 *.py[cod]
+.next/
+out/
+data/next/
