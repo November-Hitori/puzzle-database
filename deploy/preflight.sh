@@ -2,6 +2,7 @@
 set -euo pipefail
 archive="$1"
 runtime="$2"
+python3 "$(dirname -- "$0")/release_archive.py" verify "$archive"
 preflight_dir=$(mktemp -d /tmp/puzarchive-release-preflight.XXXXXX)
 trap 'rm -rf "$preflight_dir"' EXIT
 mkdir -m 0755 "$preflight_dir/app"
