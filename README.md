@@ -98,7 +98,7 @@ npm run test:browser
 
 ## CI/CD
 
-生产发布由 `Sigmit64/puzzle-database` 的 GitHub Actions 自动执行：独立 PR 审查通过后合并到 `main`，运行完整测试、真实桌面浏览器验收和只读发行包预检，再备份、原子发布及数据保留校验。上游仓库只运行 CI。配置与运行命令见 [docs/ci-cd.md](docs/ci-cd.md)。
+生产发布由 `Sigmit64/puzzle-database` 的 GitHub Actions 自动执行：代码通过 PR 提交并经独立 GPT-6 Luna high reviewer 验收（不额外要求 GitHub 人工批准），完整测试、真实桌面浏览器验收和只读发行包预检通过后合并到 `main`，再备份、原子发布及数据保留校验。上游仓库只运行 CI。配置与运行命令见 [docs/ci-cd.md](docs/ci-cd.md)。
 
 ## 用户名与共同补链接
 
