@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import {getPuzzleSource,isConcretePuzzlinkPuzzleUrl} from './puzzle-url.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { getPenpaGuidelines } from './penpa-guidelines.mjs';
 import { annotateQualityErrors, getCalendarArea, normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
@@ -855,7 +856,7 @@ function puzzleByNumber(number, userId, scope, context=null) {
     puzzle.editVersion = Number(row.edit_version);
     puzzle.penpaEditUrl=row.penpa_edit_url;
     puzzle.penpaSolveUrl=row.penpa_solve_url;
-    puzzle.puzzlinkUrl=row.puzzlink_url;
+    puzzle.puzzlinkUrl=row.puzzlink_url||(isConcretePuzzlinkPuzzleUrl(row.url)?row.url:'');
     puzzle.penpaRevision=Number(row.penpa_revision);
     puzzle.assignedDate=row.assigned_date;
     const evaluations=database.prepare(`SELECT e.difficulty,e.tags_json,e.review_round,u.name,u.username FROM calendar_evaluations e
@@ -972,12 +973,23 @@ export function updateCalendarSuggestedDate(number,userId,calendarYear,date) {
   } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 export function updateCalendarPuzzle(number,userId,input) {
+  return editCalendarPuzzle(number,userId,input,false);
+}
+export function updateCalendarPenpaLinks(number,userId,input) {
+  const permitted=Object.fromEntries(['penpaEditUrl','penpaSolveUrl','expectedEditVersion','expectedReviewRound'].filter(key=>Object.hasOwn(input,key)).map(key=>[key,input[key]]));
+  return editCalendarPuzzle(number,userId,permitted,true);
+}
+function editCalendarPuzzle(number,userId,input,penpaOnly) {
   const {title,source,clearReviews=false,expectedEditVersion,expectedReviewRound}=input;
   database.exec('BEGIN IMMEDIATE');
   try {
     const row=database.prepare("SELECT * FROM puzzles WHERE number=? AND scope='calendar'").get(number);
     if (!row) { database.exec('ROLLBACK'); return {error:'missing'}; }
-    if (row.submitted_by!==userId) { database.exec('ROLLBACK'); return {error:'forbidden'}; }
+    if (penpaOnly) {
+      const active=database.prepare('SELECT 1 FROM trusted_users WHERE id=? AND is_active=1 AND username IS NOT NULL AND password_hash IS NOT NULL').get(userId);
+      if (!active) { database.exec('ROLLBACK'); return {error:'forbidden'}; }
+      if (getCalendarPuzzle(number,userId).calendarArea!=='allocation') { database.exec('ROLLBACK'); return {error:'not-allocation'}; }
+    } else if (row.submitted_by!==userId) { database.exec('ROLLBACK'); return {error:'forbidden'}; }
     if (row.edit_version!==expectedEditVersion || row.review_round!==expectedReviewRound) { database.exec('ROLLBACK'); return {error:'stale'}; }
     const links=normalizeCalendarLinks(input,{url:row.url,inputMode:row.input_mode,penpaEditUrl:row.penpa_edit_url,penpaSolveUrl:row.penpa_solve_url,puzzlinkUrl:row.puzzlink_url});
     if (links.error) { database.exec('ROLLBACK'); return {error:'invalid-links'}; }
@@ -989,7 +1001,7 @@ export function updateCalendarPuzzle(number,userId,input) {
     }
     database.prepare(`UPDATE puzzles SET title=?,url=?,source=?,edit_version=edit_version+1,
       calendar_status=?,review_round=?,penpa_edit_url=?,penpa_solve_url=?,puzzlink_url=?,penpa_revision=penpa_revision+?,assigned_date=? WHERE id=?`)
-      .run(title.trim(),links.value.url,source,clearReviews?'pending':row.calendar_status,row.review_round+(clearReviews?1:0),
+      .run(penpaOnly?row.title:title.trim(),links.value.url,penpaOnly?(row.input_mode==='blank'?row.source:getPuzzleSource(links.value.url)):source,clearReviews?'pending':row.calendar_status,row.review_round+(clearReviews?1:0),
         links.value.penpaEditUrl,links.value.penpaSolveUrl,links.value.puzzlinkUrl,penpaChanged?1:0,clearReviews?null:row.assigned_date,row.id);
     database.exec('COMMIT');
     return {puzzle:getCalendarPuzzle(number,userId)};
@@ -1161,6 +1173,18 @@ export function findUserByUsernameKey(usernameKey) {
   const user=database.prepare(`SELECT id,name,username,username_key,password_hash,is_active
     FROM trusted_users WHERE username_key=?`).get(usernameKey);
   return user?{id:user.id,name:user.name,username:user.username,usernameKey:user.username_key,passwordHash:user.password_hash,active:Boolean(user.is_active)}:null;
+}
+export function renameAccount(userId,username,usernameKey,expectedUsername) {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const user=database.prepare('SELECT username FROM trusted_users WHERE id=? AND is_active=1 AND password_hash IS NOT NULL').get(userId);
+    if (!user?.username) { database.exec('ROLLBACK'); return {error:'inactive'}; }
+    if (user.username!==expectedUsername) { database.exec('ROLLBACK'); return {error:'stale'}; }
+    if (database.prepare('SELECT 1 FROM trusted_users WHERE username_key=? AND id<>?').get(usernameKey,userId)) { database.exec('ROLLBACK'); return {error:'duplicate'}; }
+    database.prepare('UPDATE trusted_users SET username=?,username_key=?,name=? WHERE id=?').run(username,usernameKey,username,userId);
+    database.exec('COMMIT');
+    return {user:{id:userId,name:username,username}};
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 export function registerAccountWithGate(gateTokenHash,username,usernameKey,passwordHash,sessionTokenHash,expiresAt) {
   database.exec('BEGIN IMMEDIATE');

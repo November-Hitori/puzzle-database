@@ -200,11 +200,12 @@ function renderCalendarWorkflow(puzzle) {
   const guidelinesMatch = state.penpaGuidelines?.revision===audit.guidelinesRevision;
   const own = audit.currentReviews?.find((review)=>String(review.userId)===String(state.user?.id));
   const linkErrors = quality.errors.some((error)=>error.item==='links'&&!error.ignored);
-  return `<section class="calendar-workflow-panel"><header><h2>${esc(calendarStatusLabel(calendarAreaOf(puzzle)))}</h2><span>错误 ${quality.errors.filter((error)=>!error.ignored).length} · 警告 ${quality.warnings.length}</span></header>${renderCalendarPuzzleLinks(puzzle)}${renderQualityErrors(quality.errors,'puzzle',puzzle.number)}${quality.warnings.length?`<ul class="quality-warning-list">${quality.warnings.map((warning)=>`<li>${esc(warning.message)}</li>`).join('')}</ul>`:'<p class="quality-ok-pill">质量条件已满足</p>'}${approved?`<div class="calendar-workflow-actions"><section><h3>正式日期分配</h3><p class="form-help">建议日期仅供参考；正式分配日期会占用档期。</p><label class="form-field"><span>${puzzle.calendarYear} 年的日期</span><input id="assignedCalendarDate" type="date" min="${puzzle.calendarYear}-01-01" max="${puzzle.calendarYear}-12-31" value="${esc(puzzle.assignedDate || puzzle.suggestedDate || '')}" /></label><div class="audit-actions">${button(puzzle.assignedDate?'调整分配日期':'分配日期','assignCalendarDateButton','button button-light')}${puzzle.assignedDate?button('取消日期分配','clearAssignedDateButton','button button-light'):''}</div><p class="modal-error" id="calendarAssignmentError" role="alert"></p></section><section><h3>Penpa 制图规范审计 · 第 ${audit.revision} 版</h3><p>${Number(audit.approvalCount)||0}/3 位成员通过${audit.status==='rejected'?' · 已打回':''}</p>${(audit.currentReviews || []).length?`<p class="audit-reviewers">${audit.currentReviews.map((review)=>`${esc(review.username || review.name)}：${review.decision==='approve'?'通过':'打回'}${review.suggestion?`（${esc(review.suggestion)}）`:''}`).join('、')}</p>`:''}${renderPenpaGuidelines()}<div class="audit-actions"><button type="button" class="button button-light" data-penpa-audit="approve" ${!audit.guidelinesAvailable||!guidelinesMatch||linkErrors||audit.status==='rejected'||audit.status==='approved'||own?.decision==='approve'?'disabled':''}>${own?.decision==='approve'?'✓ 已通过':'✓ 通过制图审计'}</button><button type="button" class="text-button" data-penpa-audit="reject" ${!audit.guidelinesAvailable||!guidelinesMatch||own?.decision==='reject'?'disabled':''}>打回并建议</button></div>${audit.history?.length?`<details class="audit-history"><summary>制图审计历史（${audit.history.length}）</summary><ol>${audit.history.map((entry)=>`<li>${esc(entry.username || entry.name)} · 第 ${entry.revision} 版 · ${entry.decision==='approve'?'通过':'打回'}${entry.revision!==audit.revision||entry.guidelinesRevision!==audit.guidelinesRevision?' · 历史版本（不计入当前审核）':''}${entry.suggestion?`<p>${esc(entry.suggestion)}</p>`:''}</li>`).join('')}</ol></details>`:''}</section></div>`:'<p class="form-help">取得三票净支持进入待分配区后，可分配正式日期并提交制图审计。</p>'}</section>`;
+  return `<section class="calendar-workflow-panel"><header><h2>${esc(calendarStatusLabel(calendarAreaOf(puzzle)))}</h2><span>错误 ${quality.errors.filter((error)=>!error.ignored).length} · 警告 ${quality.warnings.length}</span></header>${renderCalendarPuzzleLinks(puzzle)}${calendarAreaOf(puzzle)==='allocation'?button('补充或修改 Penpa 链接','editSharedPenpaLinksButton','button button-light'):''}${renderQualityErrors(quality.errors,'puzzle',puzzle.number)}${quality.warnings.length?`<ul class="quality-warning-list">${quality.warnings.map((warning)=>`<li>${esc(warning.message)}</li>`).join('')}</ul>`:'<p class="quality-ok-pill">质量条件已满足</p>'}${approved?`<div class="calendar-workflow-actions"><section><h3>正式日期分配</h3><p class="form-help">建议日期仅供参考；正式分配日期会占用档期。</p><label class="form-field"><span>${puzzle.calendarYear} 年的日期</span><input id="assignedCalendarDate" type="date" min="${puzzle.calendarYear}-01-01" max="${puzzle.calendarYear}-12-31" value="${esc(puzzle.assignedDate || puzzle.suggestedDate || '')}" /></label><div class="audit-actions">${button(puzzle.assignedDate?'调整分配日期':'分配日期','assignCalendarDateButton','button button-light')}${puzzle.assignedDate?button('取消日期分配','clearAssignedDateButton','button button-light'):''}</div><p class="modal-error" id="calendarAssignmentError" role="alert"></p></section><section><h3>Penpa 制图规范审计 · 第 ${audit.revision} 版</h3><p>${Number(audit.approvalCount)||0}/3 位成员通过${audit.status==='rejected'?' · 已打回':''}</p>${(audit.currentReviews || []).length?`<p class="audit-reviewers">${audit.currentReviews.map((review)=>`${esc(review.username || review.name)}：${review.decision==='approve'?'通过':'打回'}${review.suggestion?`（${esc(review.suggestion)}）`:''}`).join('、')}</p>`:''}${renderPenpaGuidelines()}<div class="audit-actions"><button type="button" class="button button-light" data-penpa-audit="approve" ${!audit.guidelinesAvailable||!guidelinesMatch||linkErrors||audit.status==='rejected'||audit.status==='approved'||own?.decision==='approve'?'disabled':''}>${own?.decision==='approve'?'✓ 已通过':'✓ 通过制图审计'}</button><button type="button" class="text-button" data-penpa-audit="reject" ${!audit.guidelinesAvailable||!guidelinesMatch||own?.decision==='reject'?'disabled':''}>打回并建议</button></div>${audit.history?.length?`<details class="audit-history"><summary>制图审计历史（${audit.history.length}）</summary><ol>${audit.history.map((entry)=>`<li>${esc(entry.username || entry.name)} · 第 ${entry.revision} 版 · ${entry.decision==='approve'?'通过':'打回'}${entry.revision!==audit.revision||entry.guidelinesRevision!==audit.guidelinesRevision?' · 历史版本（不计入当前审核）':''}${entry.suggestion?`<p>${esc(entry.suggestion)}</p>`:''}</li>`).join('')}</ol></details>`:''}</section></div>`:'<p class="form-help">取得三票净支持进入待分配区后，可分配正式日期并提交制图审计。</p>'}</section>`;
 }
 function bindCalendarWorkflow(puzzle) {
   const panel = document.querySelector('.calendar-workflow-panel');
   if (!panel) return;
+  panel.querySelector('#editSharedPenpaLinksButton')?.addEventListener('click',()=>openSharedPenpaEditor(puzzle));
   bindQualityIgnores(panel);
   const refreshGuidelines = async () => {
     if (panel.dataset.guidelinesLoading==='true') return;
@@ -489,13 +490,13 @@ function renderAuditGroup(rule, item, group, errors, warnings) {
   const incomplete = group.status === 'incomplete' || itemErrors.length > 0;
   const rejected = Boolean(group.rejected) || group.status === 'rejected';
   const approvals = Number(group.approvalCount || 0); const required = Number(group.requiredApprovals || 3);
-  const approvedBy = (group.currentReviews || []).filter((review) => review.decision === 'approve' && review.active !== false).map((review) => review.name || '成员');
+  const approvedBy = (group.currentReviews || []).filter((review) => review.decision === 'approve' && review.active !== false).map((review) => review.username || review.name || '成员');
   const rejectionSuggestion = group.rejectionSuggestion || (group.currentReviews || []).find((review) => review.decision === 'reject')?.suggestion;
   const currentReview = (group.currentReviews || []).find((review) => String(review.userId) === String(state.user?.id));
   const history = group.history || [];
   const statusLabel = rejected ? '有打回意见' : group.status === 'approved' ? '已通过' : incomplete ? '内容未完整' : `${approvals}/${required} 通过`;
   const approveDisabled = incomplete || rejected || group.status === 'approved' || currentReview?.decision === 'approve';
-  return `<article class="rule-audit-item ${rejected ? 'is-rejected' : ''} ${group.status === 'approved' ? 'is-approved' : ''}"><header><div><h3>${auditLabels[item]}</h3><span class="audit-status">${statusLabel}</span></div><span class="audit-count" title="需要不同账号独立审核">${approvals}/${required} 位成员</span></header>${incomplete ? `<p class="audit-explanation">${itemErrors.map((entry) => esc(entry.message)).join('；') || '补齐缺项后才能通过'}</p>` : `<p class="audit-reviewers">${approvedBy.length ? `通过成员：${approvedBy.map(esc).join('、')}` : '等待成员审核'}</p>`}${rejected ? `<div class="audit-rejection"><strong>审计建议</strong><p>${esc(rejectionSuggestion || '未填写建议')}</p></div>` : ''}${itemWarnings.map((entry) => `<p class="audit-explanation">${esc(entry.message)}</p>`).join('')}<div class="audit-actions"><button type="button" class="button button-light" data-rule-audit="approve" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${approveDisabled ? 'disabled' : ''} title="${incomplete ? '补齐缺项后才能通过' : rejected ? '被打回的内容需先实际修改' : group.status === 'approved' ? '本审核项已有三位成员通过' : ''}">✓ ${currentReview?.decision === 'approve' ? '已通过' : '通过'}</button><button type="button" class="text-button audit-reject-button" data-rule-audit="reject" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${currentReview?.decision === 'reject' ? 'disabled' : ''}>打回并建议</button></div>${history.length ? `<details class="audit-history"><summary>审核记录（${history.length}）</summary><ol>${history.map((entry) => `<li><strong>${esc(entry.name || '成员')}</strong> · ${entry.decision === 'approve' ? '通过' : '打回'} · 第 ${esc(entry.revision)} 版 · ${esc(entry.createdAt || '')}${entry.suggestion ? `<p>${esc(entry.suggestion)}</p>` : ''}</li>`).join('')}</ol></details>` : ''}</article>`;
+  return `<article class="rule-audit-item ${rejected ? 'is-rejected' : ''} ${group.status === 'approved' ? 'is-approved' : ''}"><header><div><h3>${auditLabels[item]}</h3><span class="audit-status">${statusLabel}</span></div><span class="audit-count" title="需要不同账号独立审核">${approvals}/${required} 位成员</span></header>${incomplete ? `<p class="audit-explanation">${itemErrors.map((entry) => esc(entry.message)).join('；') || '补齐缺项后才能通过'}</p>` : `<p class="audit-reviewers">${approvedBy.length ? `通过成员：${approvedBy.map(esc).join('、')}` : '等待成员审核'}</p>`}${rejected ? `<div class="audit-rejection"><strong>审计建议</strong><p>${esc(rejectionSuggestion || '未填写建议')}</p></div>` : ''}${itemWarnings.map((entry) => `<p class="audit-explanation">${esc(entry.message)}</p>`).join('')}<div class="audit-actions"><button type="button" class="button button-light" data-rule-audit="approve" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${approveDisabled ? 'disabled' : ''} title="${incomplete ? '补齐缺项后才能通过' : rejected ? '被打回的内容需先实际修改' : group.status === 'approved' ? '本审核项已有三位成员通过' : ''}">✓ ${currentReview?.decision === 'approve' ? '已通过' : '通过'}</button><button type="button" class="text-button audit-reject-button" data-rule-audit="reject" data-rule-id="${esc(rule.id)}" data-audit-item="${item}" ${currentReview?.decision === 'reject' ? 'disabled' : ''}>打回并建议</button></div>${history.length ? `<details class="audit-history"><summary>审核记录（${history.length}）</summary><ol>${history.map((entry) => `<li><strong>${esc(entry.username || entry.name || '成员')}</strong> · ${entry.decision === 'approve' ? '通过' : '打回'} · 第 ${esc(entry.revision)} 版 · ${esc(entry.createdAt || '')}${entry.suggestion ? `<p>${esc(entry.suggestion)}</p>` : ''}</li>`).join('')}</ol></details>` : ''}</article>`;
 }
 
 
@@ -702,7 +703,7 @@ function renderPenpaGuidelines() {
 }
 function calendarLinkFields(prefix, puzzle = {}) {
   const legacy = normalizeCalendarLinks({url:puzzle.url || ''}).value || {};
-  return `<label class="form-field"><span>Penpa 编辑链接（上传时可留空）</span><input id="${prefix}PenpaEdit" type="url" maxlength="4096" value="${esc(puzzle.penpaEditUrl ?? legacy.penpaEditUrl ?? '')}" placeholder="https://penpa-edit.com/?m=edit&p=…" /></label><label class="form-field"><span>Penpa 解题链接</span><input id="${prefix}PenpaSolve" type="url" maxlength="4096" value="${esc(puzzle.penpaSolveUrl ?? legacy.penpaSolveUrl ?? '')}" placeholder="https://penpa-edit.com/?m=solve&p=…" /></label><label class="form-field"><span>puzz.link 链接（可选）</span><input id="${prefix}Puzzlink" type="url" maxlength="4096" value="${esc(puzzle.puzzlinkUrl ?? legacy.puzzlinkUrl ?? '')}" placeholder="https://puzz.link/p?…" /></label><p class="form-help">上传时至少提供 Penpa 解题或 puzz.link 链接之一。三票净支持通过后需补齐两种 Penpa 链接；puzz.link 可留空。</p>${renderPenpaGuidelines()}`;
+  return `<label class="form-field"><span>Penpa 编辑链接（上传时可留空）</span><input id="${prefix}PenpaEdit" type="url" maxlength="4096" value="${esc(puzzle.penpaEditUrl ?? legacy.penpaEditUrl ?? '')}" placeholder="https://penpa-edit.com/?m=edit&p=…" /></label><label class="form-field"><span>Penpa 解题链接</span><input id="${prefix}PenpaSolve" type="url" maxlength="4096" value="${esc(puzzle.penpaSolveUrl ?? legacy.penpaSolveUrl ?? '')}" placeholder="https://penpa-edit.com/?m=solve&p=…" /></label><label class="form-field"><span>puzz.link / fork 链接（可选）</span><input id="${prefix}Puzzlink" type="url" maxlength="4096" value="${esc(puzzle.puzzlinkUrl ?? legacy.puzzlinkUrl ?? '')}" placeholder="https://puzz.link/p?…" /></label><p class="form-help">上传时至少提供 Penpa 解题或 puzz.link 链接之一。支持 puzz.link、pzplus.tck.mn、pzprxs.vercel.app 和 pzv.jp 的具体题目链接。三票净支持通过后需补齐两种 Penpa 链接；fork 链接可留空。</p>${renderPenpaGuidelines()}`;
 }
 function readCalendarLinks(prefix, inputMode = 'external') {
   return normalizeCalendarLinks({inputMode,penpaEditUrl:document.getElementById(`${prefix}PenpaEdit`).value,penpaSolveUrl:document.getElementById(`${prefix}PenpaSolve`).value,puzzlinkUrl:document.getElementById(`${prefix}Puzzlink`).value});
@@ -922,6 +923,55 @@ function applyCalendarPuzzle(puzzle) {
   state.calendarLeftovers = state.calendarLeftovers.filter((entry) => Number(entry.number) !== Number(puzzle.number));
   (puzzle.calendarStatus === 'leftover' ? state.calendarLeftovers : state.calendarPuzzles).push(normalized);
 }
+function openSharedPenpaEditor(puzzle) {
+  if (!puzzle || calendarAreaOf(puzzle)!=='allocation') return;
+  openModal(`<p class="modal-eyebrow">CALENDAR PUZZLE · #${puzzle.number}</p><h2 id="modalTitle">共同补充 Penpa 链接</h2><p class="modal-intro">待分配区的题目可由任意登录成员补充或修改两种 Penpa 链接。链接改变后，制图审计将重新开始；做题评价与日期分配保留。</p><label class="form-field"><span>Penpa 编辑链接</span><input id="sharedPenpaEdit" type="url" maxlength="4096" value="${esc(puzzle.penpaEditUrl)}" placeholder="https://penpa-edit.com/?m=edit&p=…" /></label><label class="form-field"><span>Penpa 解题链接</span><input id="sharedPenpaSolve" type="url" maxlength="4096" value="${esc(puzzle.penpaSolveUrl)}" placeholder="https://penpa-edit.com/?m=solve&p=…" /></label>${renderPenpaGuidelines()}<div class="modal-error" id="sharedPenpaError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存 Penpa 链接','saveSharedPenpaButton')}</div>`);
+  const errorNode=document.querySelector('#sharedPenpaError');
+  const save=document.querySelector('#saveSharedPenpaButton');
+  save.addEventListener('click',async()=>{
+    if (save.disabled) return;
+    const input={penpaEditUrl:document.querySelector('#sharedPenpaEdit').value.trim(),penpaSolveUrl:document.querySelector('#sharedPenpaSolve').value.trim(),expectedEditVersion:puzzle.editVersion,expectedReviewRound:puzzle.reviewRound};
+    const links=normalizeCalendarLinks({...input,inputMode:puzzle.inputMode},puzzle);
+    if (links.error) { errorNode.textContent=links.error;return; }
+    const epoch=state.sessionEpoch; const userId=state.user?.id;
+    save.disabled=true;errorNode.textContent='';
+    try {
+      const data=await apiRequest(`/api/calendar/puzzles/${puzzle.number}/penpa-links`,{method:'PATCH',body:JSON.stringify(input)});
+      if (!isCurrentUserSession(epoch,userId)) return;
+      applyCalendarPuzzle(data.puzzle);
+      if (errorNode.isConnected) closeModal();
+      const frame=document.querySelector('#puzzleEmbed');
+      if (frame) frame.innerHTML=renderEmbed(data.puzzle);
+      updateCalendarReviewPage(data.puzzle);
+      showToast('Penpa 链接已保存；链接改变后需重新制图审计。');
+    } catch(error) {
+      if (isCurrentUserSession(epoch,userId)&&errorNode.isConnected) errorNode.textContent=error.status===409?'题目已更新或已离开待分配区，请关闭窗口并刷新后重试。':error.message;
+    } finally { if (save.isConnected) save.disabled=false; }
+  });
+}
+function openUsernameEditor() {
+  if (!state.user) return;
+  const expectedUsername=state.user.username;
+  openModal(`<p class="modal-eyebrow">MEMBER ACCOUNT</p><h2 id="modalTitle">修改用户名</h2><p class="modal-intro">修改后使用新用户名和原密码登录。账号、题目、评价、完成记录及当前登录会话保持不变。</p><label class="form-field"><span>新用户名</span><input id="newUsername" type="text" maxlength="64" autocomplete="username" autocapitalize="none" spellcheck="false" value="${esc(expectedUsername)}" /></label><p class="form-help">2–32 个字符，可使用字母、数字、下划线和连字符。用户名不区分大小写且不能与其他成员重复。</p><div class="modal-error" id="usernameEditError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存用户名','saveUsernameButton')}</div>`);
+  const errorNode=document.querySelector('#usernameEditError'); const save=document.querySelector('#saveUsernameButton');
+  save.addEventListener('click',async()=>{
+    if (save.disabled) return;
+    const normalized=normalizeUsername(document.querySelector('#newUsername').value.trim());
+    if (!normalized) { errorNode.textContent='用户名需为 2–32 个字符，可使用字母、数字、下划线和连字符。';return; }
+    const epoch=state.sessionEpoch; const userId=state.user.id;
+    save.disabled=true;errorNode.textContent='';
+    try {
+      const data=await apiRequest('/api/account/username',{method:'PATCH',body:JSON.stringify({username:normalized.username,expectedUsername})});
+      if (!isCurrentUserSession(epoch,userId)) return;
+      state.sessionEpoch+=1;state.user=data.user;
+      if (errorNode.isConnected) closeModal();
+      await loadPrivateData();
+      showToast('用户名已修改，之后请使用新用户名登录。');
+    } catch(error) {
+      if (isCurrentUserSession(epoch,userId)&&errorNode.isConnected) errorNode.textContent=error.message;
+    } finally { if (save.isConnected) save.disabled=false; }
+  });
+}
 function openCalendarPuzzleEditor(puzzle) {
   if (!puzzle) return;
   openModal(`<p class="modal-eyebrow">CALENDAR PUZZLE · #${puzzle.number}</p><h2 id="modalTitle">编辑题目</h2><label class="form-field"><span>题目名称</span><input id="editPuzzleTitle" type="text" maxlength="200" value="${esc(puzzle.title)}" /></label>${calendarLinkFields('editPuzzle',puzzle)}<label class="variant-toggle"><input id="clearPuzzleReviews" type="checkbox" /> 清除过去的做题评价</label><p class="form-help">默认保留评价。勾选后会清除所有轮次的难度、标签和投票，并开启新一轮审核；完成记录和留言保留。</p><div class="modal-error" id="editPuzzleError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存修改', 'savePuzzleEditButton')}</div>`);
@@ -1070,6 +1120,7 @@ function renderRoute() {
   const profileName = state.user?.username || state.user?.name || '?';
   document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号 · 退出</small></span><span class="profile-more">···</span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span><span class="profile-more">···</span>';
   const authButton = document.querySelector('#loginButton');
+  document.querySelector('#changeUsernameButton').hidden = !state.user;
   authButton.classList.toggle('is-logout', Boolean(state.user));
   authButton.innerHTML = '退出 <span>↗</span>';
   authButton.setAttribute('aria-label', '退出登录');
@@ -1187,6 +1238,7 @@ async function logout() {
 }
 document.querySelector('#loginButton').addEventListener('click', logout);
 document.querySelector('#profileButton').addEventListener('click', logout);
+document.querySelector('#changeUsernameButton').addEventListener('click', openUsernameEditor);
 document.querySelector('#inboxButton')?.addEventListener('click', () => { if (state.user && getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
 window.addEventListener('hashchange', renderRoute);

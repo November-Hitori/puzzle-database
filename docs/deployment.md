@@ -143,3 +143,17 @@ Before setup, allow inbound TCP 80 from the internet so Let's Encrypt HTTP-01 is
 The script disables only Ubuntu's stock `sites-enabled/default` symlink when it points to the stock site, preserving that symlink under `sites-available/puzarchive-disabled-default`. It refuses to replace an existing archived path. Review other existing Nginx sites before setup because the PuzArchive site uses the default listener on ports 80 and 443. The service drop-in enables trusted proxy handling only after the Nginx config is installed; direct HTTP on loopback, including SSH-forwarded access, continues to use HTTP cookies. The backend ignores forwarding headers by default and trusts them only from loopback when explicitly enabled. Login rate limiting uses the validated single `X-Real-IP` value supplied by Nginx.
 
 This IP certificate is short lived, so its automated renewal timer must remain active for the duration of the invitation test. After the test, remove public access by disabling the PuzArchive Nginx site and the proxy service drop-in, reload/restart the affected services, then remove the listener configuration and certificate only as part of an explicit cleanup. Existing database and trusted member files are not touched by the HTTPS setup.
+
+## Legacy account display normalization
+
+The production identity check established that `Trusted Member` and `Sigmit64` are the same account: the legacy configured member ID is the claimed `Sigmit64` account ID. No account merge is needed. The legacy JSON remains a backup; it does not control the current display name.
+
+After an independently accepted release and a fresh private online backup, the explicitly requested display repair may run as the service account:
+
+```sh
+sudo -u puzarchive env PUZARCHIVE_DB_PATH=/var/lib/puzarchive/puzarchive.sqlite \
+  PUZARCHIVE_USERS_PATH=/var/lib/puzarchive/trusted-users.json \
+  /opt/puzarchive/runtime/bin/node deploy/normalize-legacy-member-name.mjs
+```
+
+This isolated command uses the existing database, rechecks that the configured legacy ID and canonical `Sigmit64` username match the sole old display alias, and updates only that account's `name`. It is idempotent, leaves credentials, sessions, IDs and all business records untouched, and refuses distinct or ambiguous accounts rather than merging them. It emits only booleans and counts. Future self-service renames use authenticated `PATCH /api/account/username`; shared allocation-stage Penpa edits use `PATCH /api/calendar/puzzles/:number/penpa-links`, with puzzle version and review-round guards.
