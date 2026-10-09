@@ -941,7 +941,7 @@ function openSharedPenpaEditor(puzzle) {
       applyCalendarPuzzle(data.puzzle);
       if (errorNode.isConnected) closeModal();
       const frame=document.querySelector('#puzzleEmbed');
-      if (frame) frame.innerHTML=renderEmbed(data.puzzle);
+      if (frame&&data.puzzle.inputMode==='external'&&data.puzzle.url!==puzzle.url) frame.innerHTML=renderEmbed(data.puzzle);
       updateCalendarReviewPage(data.puzzle);
       showToast('Penpa 链接已保存；链接改变后需重新制图审计。');
     } catch(error) {

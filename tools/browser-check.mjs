@@ -153,6 +153,10 @@ try {
   const sharedUpdated=db.getCalendarPuzzle(shared.number,'browser-owner');
   assert.equal(sharedUpdated.penpaRevision,2);assert.equal(sharedUpdated.review.support,3);
   assert.equal(sharedUpdated.submittedBy.id,'reviewer-1');assert.equal(sharedUpdated.puzzlinkUrl,shared.puzzlinkUrl);
+  await page.evaluate(()=>{window.sharedSolverFrame=document.querySelector('#puzzleEmbed iframe');});
+  await page.locator('#editSharedPenpaLinksButton').click();await page.locator('#sharedPenpaEdit').fill('https://penpa-edit.com/?m=edit&p=shared-editor-revised');
+  await page.locator('#saveSharedPenpaButton').click();await page.locator('#sharedPenpaError').waitFor({state:'detached'});
+  assert.equal(await page.evaluate(()=>window.sharedSolverFrame===document.querySelector('#puzzleEmbed iframe')),true);
   await screenshot('calendar-shared-links-browser-desktop.png');
   console.log('PASS: non-uploader Penpa contribution, failed-save draft, delayed duplicate protection and retained reviews');
 
