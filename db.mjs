@@ -7,7 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { getPenpaGuidelines } from './penpa-guidelines.mjs';
 import { annotateQualityErrors, getCalendarArea, normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
 import { removeNeutralCalendarReviews } from './calendar-review-migration.mjs';
-import { CALENDAR_REVIEW_VOTES, getCalendarReviewStatus } from './calendar-review-policy.mjs';
+import {migrateCalendarScores} from './calendar-score-migration.mjs';
+import {CALENDAR_LIKING_SCORES,normalizeCalendarVote,calendarVoteValue,storedCalendarVote,summarizeCalendarVotes,getCalendarReviewStatus} from './calendar-review-policy.mjs';
 import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_REQUIRED_APPROVALS } from './rule-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
@@ -338,6 +339,7 @@ if (!database.prepare('SELECT 1 FROM calendar_review_schema_migrations WHERE ver
   } catch(error) { database.exec('ROLLBACK'); throw error; }
 }
 database.exec("CREATE UNIQUE INDEX IF NOT EXISTS calendar_assigned_date ON puzzles(assigned_date) WHERE scope='calendar' AND assigned_date IS NOT NULL");
+migrateCalendarScores(database,puzzle=>notifyCalendarApproval(puzzle,`liking-migration:${puzzle.number}:${puzzle.review_round}`));
 const seedRuleRevision=database.prepare(`INSERT OR IGNORE INTO rule_item_revisions(rule_id,item,revision,content_json)
   VALUES (?,?,?,?)`);
 for (const row of database.prepare('SELECT * FROM rules').all()) {
@@ -439,6 +441,9 @@ function participantIdentity(row) {
 
 function emptyReviewParticipants() {
   return {support:[],oppose:[],veto:[]};
+}
+function emptyScoreParticipants() {
+  return Object.fromEntries([...CALENDAR_LIKING_SCORES,'veto'].map(value=>[value,[]]));
 }
 
 export function getPuzzles(userId = 'demo-user') {
@@ -868,29 +873,36 @@ function puzzleByNumber(number, userId, scope, context=null) {
     const ownEvaluation=database.prepare('SELECT difficulty,tags_json FROM calendar_evaluations WHERE puzzle_id=? AND user_id=? ORDER BY review_round DESC LIMIT 1').get(row.id,userId);
     const tagCounts=new Map();
     for(const evaluation of evaluations) for(const tag of JSON.parse(evaluation.tags_json)) tagCounts.set(tag,(tagCounts.get(tag)||0)+1);
-    const ownVote=database.prepare('SELECT vote FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? AND user_id=?').get(row.id,row.review_round,userId)?.vote||null;
+    const ownVoteRow=database.prepare('SELECT vote,score FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? AND user_id=?').get(row.id,row.review_round,userId);
+    const ownVote=ownVoteRow?calendarVoteValue(ownVoteRow):null;
     const voteHistory=new Map();
     const participantHistory=new Map();
-    for(const item of database.prepare(`SELECT v.review_round,v.vote,u.name,u.username
+    const scoreParticipantHistory=new Map();
+    for(const item of database.prepare(`SELECT v.review_round,v.vote,v.score,u.name,u.username
       FROM calendar_review_votes v LEFT JOIN trusted_users u ON u.id=v.user_id
       WHERE v.puzzle_id=?
       ORDER BY v.review_round,COALESCE(u.name,'未知用户') COLLATE NOCASE,COALESCE(u.username,'') COLLATE NOCASE,v.user_id`).all(row.id)) {
       if(!voteHistory.has(item.review_round)) {
-        voteHistory.set(item.review_round,{support:0,oppose:0,veto:0});
+        voteHistory.set(item.review_round,[]);
         participantHistory.set(item.review_round,emptyReviewParticipants());
+        scoreParticipantHistory.set(item.review_round,emptyScoreParticipants());
       }
-      voteHistory.get(item.review_round)[item.vote]++;
-      participantHistory.get(item.review_round)[item.vote].push(participantIdentity(item));
+      const value=calendarVoteValue(item);
+      voteHistory.get(item.review_round).push(value);
+      if (value!==null) scoreParticipantHistory.get(item.review_round)[value].push(participantIdentity(item));
+      const legacyGroup=value==='veto'?'veto':value>0?'support':value<0?'oppose':null;
+      if (legacyGroup) participantHistory.get(item.review_round)[legacyGroup].push(participantIdentity(item));
     }
-    const review=voteHistory.get(row.review_round)||{support:0,oppose:0,veto:0};
+    const review=summarizeCalendarVotes(voteHistory.get(row.review_round));
     const evaluationHistory=new Map();
     for(const item of database.prepare('SELECT review_round,COUNT(*) AS count,AVG(difficulty) AS average FROM calendar_evaluations WHERE puzzle_id=? GROUP BY review_round').all(row.id)) {
       evaluationHistory.set(item.review_round,{count:Number(item.count),average:Number(Number(item.average).toFixed(1))});
     }
     const reviewHistory=Array.from({length:Number(row.review_round)},(_,index)=>{
-      const round=index+1,totals=voteHistory.get(round)||{support:0,oppose:0,veto:0},evaluationsForRound=evaluationHistory.get(round)||{count:0,average:null};
+      const round=index+1,totals=summarizeCalendarVotes(voteHistory.get(round)),evaluationsForRound=evaluationHistory.get(round)||{count:0,average:null};
       return {reviewRound:round,status:getCalendarReviewStatus(totals),...totals,netSupport:totals.support-totals.oppose,
         participants:participantHistory.get(round)||emptyReviewParticipants(),
+        scoreParticipants:scoreParticipantHistory.get(round)||emptyScoreParticipants(),
         evaluationCount:evaluationsForRound.count,averageDifficulty:evaluationsForRound.average};
     });
     puzzle.ratings=[0,0,0];puzzle.votes=database.prepare('SELECT COUNT(DISTINCT user_id) AS count FROM calendar_evaluations WHERE puzzle_id=?').get(row.id).count;puzzle.userRating=null;
@@ -903,7 +915,7 @@ function puzzleByNumber(number, userId, scope, context=null) {
     puzzle.evaluation=ownEvaluation?{difficulty:Number(ownEvaluation.difficulty),tags:JSON.parse(ownEvaluation.tags_json)}:null;
     puzzle.evaluationSummary={averageDifficulty:evaluations.length?Number((evaluations.reduce((sum,e)=>sum+Number(e.difficulty),0)/evaluations.length).toFixed(1)):null,
       tags:[...tagCounts].map(([tag,count])=>({tag,count})).sort((a,b)=>b.count-a.count||a.tag.localeCompare(b.tag))};
-    puzzle.review={...review,netSupport:review.support-review.oppose,participants:participantHistory.get(row.review_round)||emptyReviewParticipants()};
+    puzzle.review={...review,participants:participantHistory.get(row.review_round)||emptyReviewParticipants(),scoreParticipants:scoreParticipantHistory.get(row.review_round)||emptyScoreParticipants()};
     puzzle.reviewHistory=reviewHistory;
     puzzle.userVote=ownVote;
     puzzle.quality=getCalendarQuality(row,rule,context?.guidelines);
@@ -1029,7 +1041,9 @@ export function addCalendarComment(number,userId,body) {
 export function calendarPuzzleExists(number) { return Boolean(database.prepare("SELECT 1 FROM puzzles WHERE number=? AND scope='calendar'").get(number)); }
 
 export function completeCalendarReview(number,userId,{difficulty,tags,vote,expectedReviewRound}) {
-  if (!CALENDAR_REVIEW_VOTES.includes(vote)) return {error:'invalid-vote'};
+  vote=normalizeCalendarVote(vote);
+  if (vote===null) return {error:'invalid-vote'};
+  const storedVote=storedCalendarVote(vote),score=vote==='veto'?null:vote;
   database.exec('BEGIN IMMEDIATE');
   try {
     const puzzle=database.prepare("SELECT id,title,submitted_by,calendar_status,review_round FROM puzzles WHERE number=? AND scope='calendar'").get(number);
@@ -1038,7 +1052,8 @@ export function completeCalendarReview(number,userId,{difficulty,tags,vote,expec
     if (puzzle.calendar_status==='leftover') { database.exec('ROLLBACK'); return {error:'reentry-required'}; }
     const active=database.prepare(`SELECT 1 FROM trusted_users WHERE id=? AND is_active=1 AND username IS NOT NULL AND password_hash IS NOT NULL`).get(userId);
     if (!active) { database.exec('ROLLBACK'); return {error:'inactive'}; }
-    const existing=database.prepare('SELECT vote FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? AND user_id=?').get(puzzle.id,puzzle.review_round,userId);
+    const existing=database.prepare('SELECT vote,score FROM calendar_review_votes WHERE puzzle_id=? AND review_round=? AND user_id=?').get(puzzle.id,puzzle.review_round,userId);
+    const changed=!existing||calendarVoteValue(existing)!==vote;
     if (existing?.vote==='veto'&&vote!=='veto') { database.exec('ROLLBACK'); return {error:'veto-locked'}; }
     database.prepare(`INSERT INTO calendar_evaluations(puzzle_id,user_id,review_round,difficulty,tags_json,updated_at)
       VALUES (?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(puzzle_id,user_id,review_round) DO UPDATE SET
@@ -1046,35 +1061,38 @@ export function completeCalendarReview(number,userId,{difficulty,tags,vote,expec
       .run(puzzle.id,userId,puzzle.review_round,difficulty,JSON.stringify(tags));
     database.prepare('INSERT OR IGNORE INTO puzzle_completions(puzzle_id,user_id) VALUES (?,?)').run(puzzle.id,userId);
     if (!existing) {
-      database.prepare(`INSERT INTO calendar_review_votes(puzzle_id,review_round,user_id,vote,updated_at)
-        VALUES (?,?,?,?,CURRENT_TIMESTAMP)`).run(puzzle.id,puzzle.review_round,userId,vote);
-      database.prepare(`INSERT INTO calendar_review_vote_events(puzzle_id,review_round,user_id,vote)
-        VALUES (?,?,?,?)`).run(puzzle.id,puzzle.review_round,userId,vote);
-    } else if (existing.vote!==vote) {
-      database.prepare(`UPDATE calendar_review_votes SET vote=?,updated_at=CURRENT_TIMESTAMP
-        WHERE puzzle_id=? AND review_round=? AND user_id=?`).run(vote,puzzle.id,puzzle.review_round,userId);
-      database.prepare(`INSERT INTO calendar_review_vote_events(puzzle_id,review_round,user_id,vote)
-        VALUES (?,?,?,?)`).run(puzzle.id,puzzle.review_round,userId,vote);
+      database.prepare(`INSERT INTO calendar_review_votes(puzzle_id,review_round,user_id,vote,score,updated_at)
+        VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)`).run(puzzle.id,puzzle.review_round,userId,storedVote,score);
+      database.prepare(`INSERT INTO calendar_review_vote_events(puzzle_id,review_round,user_id,vote,score)
+        VALUES (?,?,?,?,?)`).run(puzzle.id,puzzle.review_round,userId,storedVote,score);
+    } else if (changed) {
+      database.prepare(`UPDATE calendar_review_votes SET vote=?,score=?,updated_at=CURRENT_TIMESTAMP
+        WHERE puzzle_id=? AND review_round=? AND user_id=?`).run(storedVote,score,puzzle.id,puzzle.review_round,userId);
+      database.prepare(`INSERT INTO calendar_review_vote_events(puzzle_id,review_round,user_id,vote,score)
+        VALUES (?,?,?,?,?)`).run(puzzle.id,puzzle.review_round,userId,storedVote,score);
     }
-    const totals={support:0,oppose:0,veto:0};
-    for(const row of database.prepare(`SELECT vote,COUNT(*) AS count FROM calendar_review_votes
-      WHERE puzzle_id=? AND review_round=? GROUP BY vote`).all(puzzle.id,puzzle.review_round)) totals[row.vote]=Number(row.count);
+    const totals=summarizeCalendarVotes(database.prepare('SELECT vote,score FROM calendar_review_votes WHERE puzzle_id=? AND review_round=?').all(puzzle.id,puzzle.review_round).map(calendarVoteValue));
     const status=getCalendarReviewStatus(totals);
     if (status!==puzzle.calendar_status) database.prepare(`UPDATE puzzles SET calendar_status=?,assigned_date=CASE WHEN ?<>'approved' THEN NULL ELSE assigned_date END WHERE id=? AND review_round=?`).run(status,status,puzzle.id,puzzle.review_round);
     if (status==='approved'&&puzzle.calendar_status!=='approved') {
       const eventId=database.prepare('SELECT MAX(id) AS id FROM calendar_review_vote_events WHERE puzzle_id=? AND review_round=?').get(puzzle.id,puzzle.review_round).id;
-      insertUserNotification(puzzle.submitted_by,'calendar-approved',`日历谜题“${puzzle.title}”已通过审核`,'社区净支持票达到 3，已进入待分配区。','calendar-puzzle',number,`calendar-approved:${number}:${puzzle.review_round}:${eventId}`);
-      const links=database.prepare('SELECT penpa_edit_url,penpa_solve_url FROM puzzles WHERE id=?').get(puzzle.id);
-      const missing=[!links.penpa_edit_url?'Penpa 编辑链接':null,!links.penpa_solve_url?'Penpa 解题链接':null].filter(Boolean);
-      if (missing.length) insertUserNotification(puzzle.submitted_by,'calendar-links-required',`请补齐谜题“${puzzle.title}”的 Penpa 链接`,
-        `投稿已获得三票净支持，进入待分配区。请补齐${missing.join('和')}，并对照 Penpa 制图规范准备审核；puzz.link 链接可选。`,
-        'calendar-puzzle',number,`calendar-links-required:${number}:${puzzle.review_round}:${eventId}`);
+      notifyCalendarApproval({...puzzle,number},`${number}:${puzzle.review_round}:${eventId}`);
     } else if (status==='leftover'&&puzzle.calendar_status!=='leftover') {
       insertUserNotification(puzzle.submitted_by,'calendar-vetoed',`日历谜题“${puzzle.title}”进入待重新投稿`,'本轮收到否决票；内容和完成记录已保留。','calendar-puzzle',number,`calendar-vetoed:${number}:${puzzle.review_round}`);
     }
     database.exec('COMMIT');
-    return {puzzle:getCalendarPuzzle(number,userId),changedVote:!existing||existing.vote!==vote};
+    return {puzzle:getCalendarPuzzle(number,userId),changedVote:changed};
   } catch(error) { database.exec('ROLLBACK'); throw error; }
+}
+
+function notifyCalendarApproval(puzzle,key) {
+  insertUserNotification(puzzle.submitted_by,'calendar-approved',`日历谜题“${puzzle.title}”已通过审核`,
+    '至少三人已提交喜爱程度评分，平均分严格大于 0，已进入待分配区。','calendar-puzzle',puzzle.number,`calendar-approved:${key}`);
+  const links=database.prepare('SELECT penpa_edit_url,penpa_solve_url FROM puzzles WHERE id=?').get(puzzle.id);
+  const missing=[!links.penpa_edit_url?'Penpa 编辑链接':null,!links.penpa_solve_url?'Penpa 解题链接':null].filter(Boolean);
+  if (missing.length) insertUserNotification(puzzle.submitted_by,'calendar-links-required',`请补齐谜题“${puzzle.title}”的 Penpa 链接`,
+    `投稿已满足喜爱程度评分要求，进入待分配区。请补齐${missing.join('和')}，并对照 Penpa 制图规范准备审核；puzz.link 链接可选。`,
+    'calendar-puzzle',puzzle.number,`calendar-links-required:${key}`);
 }
 
 export function reenterCalendarPuzzle(number,userId,expectedReviewRound) {

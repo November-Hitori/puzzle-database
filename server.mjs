@@ -18,7 +18,7 @@ import { getPuzzleSource, parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } 
 import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
-import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES, CALENDAR_APPROVAL_NET_SUPPORT, normalizeCalendarReviewInput } from './calendar-review-policy.mjs';
+import {CALENDAR_REVIEW_TAGS,CALENDAR_REVIEW_VOTES,CALENDAR_MINIMUM_SCORE_COUNT,normalizeCalendarReviewInput} from './calendar-review-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir,'data');
@@ -256,7 +256,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && collectionMatch) { const collection=getCollection(Number(collectionMatch[1]),user.id); return collection?sendJson(response,200,{collection}):sendJson(response,404,{error:'collection not found'}); }
 
   if (request.method==='GET' && pathname==='/api/rules') return sendJson(response,200,{rules:getRules(user.id)});
-  if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,approvalNetSupport:CALENDAR_APPROVAL_NET_SUPPORT});
+  if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,minimumScoreCount:CALENDAR_MINIMUM_SCORE_COUNT,approvalAverageGreaterThan:0});
   if (request.method==='GET' && pathname==='/api/inbox') {
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
     const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before');

@@ -36,14 +36,14 @@ const ignoredDraft = db.addRule({ ...ruleInput, titleZh: '可忽略错误草稿'
 for (const item of ['name', 'description', 'example']) for (const id of ['reviewer-1', 'reviewer-2', 'reviewer-3']) assert.ok(db.submitRuleAudit(standard.id, item, 'approve', '', 1, id).rule);
 const puzzlink = 'https://puzz.link/p?slither/3/3/0000';
 const spoiler = db.addCalendarPuzzle({ title: '剧透与留言检查', author: 'NativeOne', source: 'puzz.link', url: puzzlink, inputMode: 'external', ruleId: standard.id }, { id: 'reviewer-1' }).puzzle;
-db.completeCalendarReview(spoiler.number, 'reviewer-1', { difficulty: 3, tags: [], vote: 'support', expectedReviewRound: 1 });
+db.completeCalendarReview(spoiler.number, 'reviewer-1', { difficulty: 3, tags: [], vote: 2, expectedReviewRound: 1 });
 db.database.prepare('INSERT INTO trusted_users(id,name) VALUES (?,?)').run('legacy-browser', '<img src=x onerror="window.unsafeParticipant=true">');
 const spoilerId = db.database.prepare('SELECT id FROM puzzles WHERE number=?').get(spoiler.number).id;
 db.database.prepare('INSERT INTO calendar_review_votes(puzzle_id,user_id,review_round,vote) VALUES (?,?,1,?)').run(spoilerId, 'legacy-browser', 'oppose');
 db.database.prepare('INSERT INTO calendar_evaluations(puzzle_id,user_id,review_round,difficulty,tags_json) VALUES (?,?,1,4,?)').run(spoilerId, 'legacy-browser', '[]');
 db.addCalendarComment(spoiler.number, 'reviewer-1', '<script>window.unsafeComment = true</script>\n测试解题思路');
 const shared = db.addCalendarPuzzle({title:'共同补充链接',author:'NativeOne',source:'pzplus',puzzlinkUrl:'https://pzplus.tck.mn/p.html?slither/3/3/0000',inputMode:'external',ruleId:standard.id},{id:'reviewer-1'}).puzzle;
-for (const id of ['reviewer-1','reviewer-2','reviewer-3']) assert.ok(db.completeCalendarReview(shared.number,id,{difficulty:3,tags:[],vote:'support',expectedReviewRound:1}).puzzle);
+for (const [id,vote] of [['reviewer-1',2],['reviewer-2',1],['reviewer-3',0]]) assert.ok(db.completeCalendarReview(shared.number,id,{difficulty:3,tags:[],vote,expectedReviewRound:1}).puzzle);
 const server = createServer();
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -118,8 +118,8 @@ try {
   assert.equal(await page.locator('#calendarCommentBody').inputValue(), '真实浏览器留言');
   await page.locator('#sendCalendarCommentButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('真实浏览器留言'));
   await page.evaluate(() => { window.testIframe = document.querySelector('#puzzleEmbed iframe'); });
-  await page.locator('#completePuzzleButton').click(); assert.equal(await page.locator('input[name="calendarVote"]').count(), 3);
-  await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="support"])').click();
+  await page.locator('#completePuzzleButton').click(); assert.equal(await page.locator('input[name="calendarVote"]').count(), 6);
+  await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="2"])').click();
   const reviewStart = requests.length; interception = { path: `/api/calendar/puzzles/${spoiler.number}/complete-rating`, delay: 700 };
   await page.locator('#submitCalendarEvaluationButton').click(); await duplicateDisabledClick('#submitCalendarEvaluationButton');
   await page.waitForFunction(() => !document.querySelector('#submitCalendarEvaluationButton') && document.querySelector('#completePuzzleButton').textContent.includes('已完成'));
@@ -129,11 +129,12 @@ try {
   assert.ok((await page.locator('.calendar-participant-section .vote-participants').textContent()).includes('BrowserOwner'));
   const participantFrame = await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe'));
   await page.locator('#completePuzzleButton').click();
-  await page.locator('label:has(input[name="calendarVote"][value="oppose"])').click();
+  await page.locator('label:has(input[name="calendarVote"][value="-2"])').click();
   await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#submitCalendarEvaluationButton').waitFor({state: 'detached'});
-  assert.ok((await page.locator('.vote-participants .participant-row').nth(1).textContent()).includes('BrowserOwner'));
-  assert.ok(!(await page.locator('.vote-participants .participant-row').nth(0).textContent()).includes('BrowserOwner'));
+  const currentVoteParticipants=page.locator('.calendar-review-panel > .calendar-participant-section .vote-participants');
+  assert.ok((await currentVoteParticipants.locator('.participant-row[data-liking-value="-2"]').textContent()).includes('BrowserOwner'));
+  assert.ok(!(await currentVoteParticipants.locator('.participant-row[data-liking-value="2"]').textContent()).includes('BrowserOwner'));
   assert.equal(participantFrame, true);
   assert.equal(await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe')), true);
   await screenshot('calendar-participants-browser-desktop.png');
@@ -151,7 +152,7 @@ try {
   await page.locator('#saveSharedPenpaButton').click();await duplicateDisabledClick('#saveSharedPenpaButton');
   await page.locator('#sharedPenpaError').waitFor({state:'detached'});
   const sharedUpdated=db.getCalendarPuzzle(shared.number,'browser-owner');
-  assert.equal(sharedUpdated.penpaRevision,2);assert.equal(sharedUpdated.review.support,3);
+  assert.equal(sharedUpdated.penpaRevision,2);assert.equal(sharedUpdated.review.totalScore,3);
   assert.equal(sharedUpdated.submittedBy.id,'reviewer-1');assert.equal(sharedUpdated.puzzlinkUrl,shared.puzzlinkUrl);
   await page.evaluate(()=>{window.sharedSolverFrame=document.querySelector('#puzzleEmbed iframe');});
   await page.locator('#editSharedPenpaLinksButton').click();await page.locator('#sharedPenpaEdit').fill('https://penpa-edit.com/?m=edit&p=shared-editor-revised');
@@ -187,16 +188,20 @@ try {
   await page.locator('.penpa-guidelines summary').click(); assert.ok((await page.locator('.penpa-guidelines pre').textContent()).includes('Visibility OFF'));
   await page.locator('#savePuzzleButton').click(); await page.waitForFunction(() => document.querySelector('.puzzle-header h1')?.textContent.includes('真实浏览器日历题目'));
   const number = Number(new URL(page.url()).hash.split('-').at(-1)); const puzzleUrl = `/api/calendar/puzzles/${number}`;
-  await page.locator('#completePuzzleButton').click(); await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="support"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
+  await page.locator('#completePuzzleButton').click(); await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="0"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#submitCalendarEvaluationButton').waitFor({ state: 'detached' });
   const reviewers = [];
   for (const username of ['NativeOne', 'NativeTwo']) {
     const login = await request('/api/session', 'POST', { username, password }); assert.equal(login.status, 200); reviewers.push(login.cookie);
-    assert.equal((await request(`${puzzleUrl}/complete-rating`, 'POST', { difficulty: 3, tags: [], vote: 'support', expectedReviewRound: 1 }, login.cookie)).status, 200);
+    assert.equal((await request(`${puzzleUrl}/complete-rating`, 'POST', { difficulty: 3, tags: [], vote: 2, expectedReviewRound: 1 }, login.cookie)).status, 200);
   }
-  assert.equal(db.getCalendarPuzzle(number, 'browser-owner').review.netSupport, 3);
+  assert.equal(db.getCalendarPuzzle(number, 'browser-owner').review.totalScore, 4);
   await navigate(`calendar-puzzle-${number}`, '.calendar-workflow-panel');
   assert.ok((await page.locator('.calendar-workflow-panel header').textContent()).includes('待分配区'));
+  await page.locator('#completePuzzleButton').click();
+  for (const score of [-2,-1,0,1,2]) assert.equal(await page.locator(`input[name="calendarVote"][value="${score}"]`).count(),1);
+  assert.equal(await page.locator('input[name="calendarVote"][value="0"]').isChecked(),true);
+  await page.locator('#modalBackdrop .modal-cancel').click();
   assert.ok(db.getInbox('browser-owner').notifications.some((entry) => entry.type === 'calendar-links-required'));
   await page.locator('[data-error-ignore="ignore"][data-error-key="missingPenpaEdit:links"]').click(); await page.locator('#qualityIgnoreReason').fill('明确忽略'); await page.locator('#confirmQualityIgnore').click();
   await page.locator('.calendar-workflow-panel .quality-ignored').waitFor(); await page.locator('#editCalendarPuzzleButton').click();
