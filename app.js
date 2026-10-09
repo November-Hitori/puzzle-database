@@ -50,36 +50,98 @@ const modalBackdrop = document.querySelector('#modalBackdrop');
 const modalContent = document.querySelector('#modalContent');
 const toastElement = document.querySelector('#toast');
 let toastTimer;
+const API_REQUEST_TIMEOUT_MS = 20000;
+let privateLoadAttempt = 0;
+let privateLoadController = null;
 
 async function apiRequest(path, options = {}) {
   const authEndpoint = ['/api/session', '/api/register'].includes(path);
   const requestEpoch = state.sessionEpoch;
   const requestUserId = state.user?.id;
   const authenticatedAtStart = Boolean(state.user);
-  const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options });
-  let payload = {};
-  if (response.status !== 204) {
-    try { payload = await response.json(); }
-    catch (error) {
-      if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
-      throw error;
+  const { signal, ...requestOptions } = options;
+  const readRequest = ['GET', 'HEAD'].includes(String(requestOptions.method || 'GET').toUpperCase());
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal.reason);
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener('abort', abortFromCaller, { once: true });
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, API_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...requestOptions, signal: controller.signal });
+    let payload = {};
+    if (response.status !== 204) {
+      try { payload = await response.json(); }
+      catch (error) {
+        if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
+        throw error;
+      }
     }
+    if (controller.signal.aborted) throw controller.signal.reason;
+    if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      message = payload.error || message;
+      if (response.status === 401 && state.sessionChecked && authenticatedAtStart && !authEndpoint) handleUnauthorized();
+      const error = new Error(message); error.status = response.status; throw error;
+    }
+    return payload;
+  } catch (error) {
+    if (timedOut) {
+      if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
+      throw new Error(readRequest ? '请求超时，请重试。' : '请求超时，操作结果尚未确认，请刷新页面确认后再操作。');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
-  if (!authEndpoint && (requestEpoch !== state.sessionEpoch || String(state.user?.id) !== String(requestUserId))) throw new Error('请求已取消。');
-  if (!response.ok) {
-    let message = `HTTP ${response.status}`;
-    message = payload.error || message;
-    if (response.status === 401 && state.sessionChecked && authenticatedAtStart && !authEndpoint) handleUnauthorized();
-    const error = new Error(message); error.status = response.status; throw error;
-  }
-  return payload;
 }
 function applyPuzzleData(puzzles) { state.puzzles = puzzles.map((puzzle) => ({ ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), tags: puzzle.tags || [], userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0) })); }
 async function bootstrapDatabase() { clearPrivateState(); const epoch = ++state.sessionEpoch; state.sessionChecked = false; state.authError = ''; renderRoute(); try { const session = await apiRequest('/api/session'); if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = session.user || null; if (!state.user) { renderRoute(); return; } normalizeAuthenticatedRoute(); renderRoute(); await loadPrivateData(); } catch (error) { if (epoch !== state.sessionEpoch) return; state.sessionChecked = true; state.user = null; state.serviceError = error.message || '服务暂不可用'; renderRoute(); } }
-async function loadPrivateData() { if (!state.user) return; const epoch = state.sessionEpoch; const userId = state.user.id; state.privateLoading = true; state.serviceError = ''; renderRoute(); try { const [ruleData, calendarData, leftoverData, inboxData, guidelinesData] = await Promise.all([apiRequest('/api/rules'), apiRequest('/api/calendar/puzzles'), apiRequest('/api/calendar/leftovers'), apiRequest('/api/inbox?limit=20'), apiRequest('/api/penpa-guidelines')]); if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.penpaGuidelines = guidelinesData; state.rules = ruleData.rules || []; state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle); state.calendarLeftovers = (leftoverData.puzzles || []).map(normalizePuzzle); state.inboxItems = inboxData.notifications || []; state.inboxUnreadCount = Number(inboxData.unreadCount || 0); state.inboxNextBefore = inboxData.nextBefore || null; state.privateLoading = false; state.lastPrivateRouteName = getRoute().name; renderRoute(); } catch (error) { if (epoch !== state.sessionEpoch || !state.user || String(state.user.id) !== String(userId)) return; state.privateLoading = false; state.serviceError = error.message || '无法加载私人数据'; renderRoute(); } }
+async function loadPrivateData() {
+  if (!state.user) return;
+  const epoch = state.sessionEpoch;
+  const userId = state.user.id;
+  const attempt = ++privateLoadAttempt;
+  privateLoadController?.abort();
+  const controller = new AbortController();
+  privateLoadController = controller;
+  const isCurrentAttempt = () => attempt === privateLoadAttempt && isCurrentUserSession(epoch, userId);
+  state.privateLoading = true;
+  state.serviceError = '';
+  renderRoute();
+  try {
+    const [ruleData, calendarData, leftoverData, inboxData, guidelinesData] = await Promise.all([
+      '/api/rules', '/api/calendar/puzzles', '/api/calendar/leftovers', '/api/inbox?limit=20', '/api/penpa-guidelines'
+    ].map((path) => apiRequest(path, { signal: controller.signal })));
+    if (!isCurrentAttempt()) return;
+    state.penpaGuidelines = guidelinesData;
+    state.rules = ruleData.rules || [];
+    state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle);
+    state.calendarLeftovers = (leftoverData.puzzles || []).map(normalizePuzzle);
+    state.inboxItems = inboxData.notifications || [];
+    state.inboxUnreadCount = Number(inboxData.unreadCount || 0);
+    state.inboxNextBefore = inboxData.nextBefore || null;
+    state.lastPrivateRouteName = getRoute().name;
+  } catch (error) {
+    controller.abort();
+    if (!isCurrentAttempt()) return;
+    state.serviceError = error.message || '无法加载私人数据';
+  } finally {
+    if (privateLoadController === controller) privateLoadController = null;
+    if (isCurrentAttempt()) {
+      state.privateLoading = false;
+      renderRoute();
+    }
+  }
+}
 function normalizePuzzle(puzzle) { return { ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0), tags: puzzle.tags || [] }; }
 function isCurrentUserSession(epoch, userId) { return epoch === state.sessionEpoch && Boolean(state.user) && String(state.user.id) === String(userId); }
-function clearPrivateState() { state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function clearPrivateState() { privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
@@ -230,7 +292,10 @@ function bindCalendarWorkflow(puzzle) {
   if (puzzle.quality.penpa.guidelinesAvailable&&state.penpaGuidelines?.revision!==puzzle.quality.penpa.guidelinesRevision) void refreshGuidelines();
   panel.querySelectorAll('[data-calendar-solver]').forEach((control)=>control.addEventListener('click',()=>{
     const url=control.dataset.calendarSolver==='penpa'?puzzle.penpaSolveUrl:puzzle.puzzlinkUrl;
-    if (parseTrustedPuzzleUrl(url)) document.querySelector('#puzzleEmbed').innerHTML=renderEmbed({...puzzle,url});
+    if (parseTrustedPuzzleUrl(url)) {
+      document.querySelector('#puzzleEmbed').innerHTML=renderEmbed({...puzzle,url});
+      bindPenpaKeyboard();
+    }
   }));
   const assign = async (clear=false) => {
     const input=panel.querySelector('#assignedCalendarDate');
@@ -530,11 +595,14 @@ function renderPuzzleOpenTools(puzzle) {
   if (!links.length || !trustedUrl) {
     return `<div class="tool-launch-panel tool-launch-blocked" role="alert"><span class="tool-launch-kicker">BLOCKED</span><strong>该链接不在支持的工具范围内</strong><p>请使用 puzz.link、pzv3、pzprxs、pzplus 或 Penpa 系列的官方题目链接。</p></div>`;
   }
-  const toolbar = `<div class="solver-toolbar"><div class="solver-toolbar-copy"><span class="tool-launch-kicker">IN-PAGE SOLVER</span><strong>页内解题</strong></div><div class="tool-link-list">${links.map((link) => `<a class="tool-link-button" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer"><span>${esc(link.name)}</span><strong>在新标签页解题 ↗</strong></a>`).join('')}</div></div>`;
-  if (!hasConcretePuzzlePayload(trustedUrl.href)) {
+  const hasPayload = hasConcretePuzzlePayload(trustedUrl.href);
+  const isPenpa = getPuzzleSource(trustedUrl.href) === 'penpa+';
+  const keyboardButton = isPenpa && hasPayload ? button('启用键盘操作', 'enablePenpaKeyboardButton', 'button button-light solver-keyboard-button') : '';
+  const toolbar = `<div class="solver-toolbar"><div class="solver-toolbar-copy"><span class="tool-launch-kicker">IN-PAGE SOLVER</span><strong>页内解题</strong></div><div class="tool-link-list">${links.map((link) => `<a class="tool-link-button" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer"><span>${esc(link.name)}</span><strong>在新标签页解题 ↗</strong></a>`).join('')}${keyboardButton}</div></div>`;
+  if (!hasPayload) {
     return `<div class="solver-shell">${toolbar}<div class="solver-empty"><strong>这个示例还没有具体题面 URL</strong><p>为避免加载网站首页文本，页内模块已停用。请使用上方工具按钮打开。</p></div></div>`;
   }
-  return `<div class="solver-shell">${toolbar}<div class="solver-frame"><iframe src="${esc(trustedUrl.href)}" title="${esc(puzzle.title)}"></iframe></div><p class="solver-note">上方按钮会打开对应网站；当前模块直接在页面内加载原题。</p></div>`;
+  return `<div class="solver-shell">${toolbar}<div class="solver-frame"><iframe src="${esc(trustedUrl.href)}" title="${esc(puzzle.title)}"${isPenpa ? ' data-penpa-keyboard' : ''}></iframe></div><p class="solver-note">上方按钮会打开对应网站；当前模块直接在页面内加载原题。${isPenpa ? '点击题目格子后，可直接使用方向键和数字键；若键盘无响应，可点击“启用键盘操作”后再点击格子。' : ''}</p></div>`;
 }
 
 function renderEmbed(puzzle) {
@@ -894,6 +962,21 @@ async function submitRuleAudit(ruleId, item, decision, suggestion = '', errorNod
     original.forEach(({control, disabled, text}) => { if (control.isConnected) { control.disabled = disabled; control.textContent = text; } });
   }
 }
+function bindPenpaKeyboard() {
+  const iframe = document.querySelector('#puzzleEmbed iframe[data-penpa-keyboard]');
+  if (!iframe) return;
+  const focusSolver = (automatic = false) => {
+    if (!iframe.isConnected || !modalBackdrop.hidden) return;
+    if (automatic && !document.hasFocus()) return;
+    // Penpa cancels canvas mousedown, so the browser may keep focus outside its frame.
+    iframe.focus({ preventScroll: true });
+    iframe.contentWindow?.focus();
+  };
+  document.querySelector('#enablePenpaKeyboardButton')?.addEventListener('click', () => focusSolver());
+  iframe.addEventListener('pointerenter', (event) => {
+    if (event.pointerType === 'mouse') focusSolver(true);
+  });
+}
 function bindPuzzleReviewActions(number, scope, puzzle) {
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number, scope));
   document.querySelector('#reenterCalendarPuzzleButton')?.addEventListener('click', () => puzzle && openCalendarReentry(puzzle));
@@ -939,7 +1022,10 @@ function openSharedPenpaEditor(puzzle) {
       applyCalendarPuzzle(data.puzzle);
       if (errorNode.isConnected) closeModal();
       const frame=document.querySelector('#puzzleEmbed');
-      if (frame&&data.puzzle.inputMode==='external'&&data.puzzle.url!==puzzle.url) frame.innerHTML=renderEmbed(data.puzzle);
+      if (frame&&data.puzzle.inputMode==='external'&&data.puzzle.url!==puzzle.url) {
+        frame.innerHTML=renderEmbed(data.puzzle);
+        bindPenpaKeyboard();
+      }
       updateCalendarReviewPage(data.puzzle);
       showToast('Penpa 链接已保存；链接改变后需重新制图审计。');
     } catch(error) {
@@ -1048,6 +1134,7 @@ function bindCalendarComments(puzzle) {
 }
 function bindPuzzle(number, scope = 'library') {
   const isCalendar = scope === 'calendar'; const puzzle = (isCalendar ? [...state.calendarPuzzles, ...state.calendarLeftovers] : state.puzzles).find((item) => Number(item.number) === Number(number));
+  bindPenpaKeyboard();
   if (isCalendar && puzzle) { bindCalendarDateInputs('suggestedDateEdit'); bindCalendarComments(puzzle); bindCalendarWorkflow(puzzle); }
   document.querySelector('#editCalendarPuzzleButton')?.addEventListener('click', () => openCalendarPuzzleEditor([...state.calendarPuzzles,...state.calendarLeftovers].find((entry)=>Number(entry.number)===Number(number))));
   bindPuzzleReviewActions(number, scope, puzzle);
