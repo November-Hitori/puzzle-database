@@ -30,12 +30,23 @@ test('workflow migration retains legacy URLs, records and IDs without inventing 
       ratings:database.prepare('SELECT * FROM puzzle_ratings').all(),completions:database.prepare('SELECT * FROM puzzle_completions').all(),
       evaluations:database.prepare('SELECT * FROM calendar_evaluations').all(),audits:database.prepare('SELECT COUNT(*) AS count FROM calendar_penpa_votes').get().count,
       notifications:database.prepare('SELECT COUNT(*) AS count FROM user_notifications').get().count};
+    database.prepare("INSERT OR IGNORE INTO calendar_review_votes(puzzle_id,review_round,user_id,vote,score) VALUES(101,1,'zero-reviewer','neutral',0)").run();
+    database.prepare("INSERT INTO calendar_review_vote_events(puzzle_id,review_round,user_id,vote,score) SELECT 101,1,'zero-reviewer','neutral',0 WHERE NOT EXISTS(SELECT 1 FROM calendar_review_vote_events WHERE user_id='zero-reviewer')").run();
     console.log(JSON.stringify(result));database.close();`;
   const run=()=>{
     const child=spawnSync(process.execPath,['--input-type=module','-e',source],{encoding:'utf8',env:{...process.env,PUZARCHIVE_DB_PATH:dbPath}});
     assert.equal(child.error,undefined,child.error?.message);
     assert.equal(child.status,0,child.stderr);
     return JSON.parse(child.stdout.trim());
+  };
+  const restart=()=>{
+    const child=spawnSync(process.execPath,['--input-type=module','-e',`import {database,getCalendarPuzzle} from ${JSON.stringify(moduleUrl)};
+      const puzzle=getCalendarPuzzle(801,'zero-reviewer');
+      console.log(JSON.stringify({userVote:puzzle.userVote,zeroScoreCount:puzzle.review.scores[0],event:database.prepare("SELECT vote,score FROM calendar_review_vote_events WHERE user_id='zero-reviewer'").get()}));
+      database.close();`],{encoding:'utf8',env:{...process.env,PUZARCHIVE_DB_PATH:dbPath}});
+    assert.equal(child.error,undefined,child.error?.message);
+    assert.equal(child.status,0,child.stderr);
+    return JSON.parse(child.stdout.trim().split('\n').at(-1));
   };
   try {
     const result=run();
@@ -45,10 +56,10 @@ test('workflow migration retains legacy URLs, records and IDs without inventing 
     assert.equal(edit.deleteToken,'old-edit-token');assert.equal(edit.completed,true);
     assert.equal(edit.evaluation.difficulty,5);assert.deepEqual(edit.evaluation.tags,['美观']);
     assert.equal(edit.suggestedDate,'2028-02-29');assert.equal(edit.assignedDate,null);
-    assert.equal(edit.calendarArea,'allocation');assert.equal(puzz.calendarArea,'leftover');
+    assert.equal(edit.calendarArea,'review');assert.equal(puzz.calendarArea,'leftover');
     assert.equal(result.ratings[0].id,9);assert.equal(result.ratings[0].puzzle_id,100);assert.equal(result.ratings[0].logic,5);
     assert.equal(result.completions[0].completed_at,'2026-01-02');assert.equal(result.evaluations[0].updated_at,'2026-01-03');
     assert.equal(result.audits,0);assert.equal(result.notifications,0);
-    assert.deepEqual(run(),result);
+    assert.deepEqual(restart(),{userVote:0,zeroScoreCount:1,event:{vote:'neutral',score:0}});
   } finally {fs.rmSync(directory,{recursive:true,force:true});}
 });

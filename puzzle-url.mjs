@@ -71,6 +71,10 @@ export function isConcretePenpaPuzzleUrl(value) {
   return Boolean(url && !url.port && getPuzzleSource(url.href)==='penpa+' && hasConcretePuzzlePayload(url.href));
 }
 
+export function isConcretePuzzlinkPuzzleUrl(value) {
+  return ['puzz.link', 'pzv3', 'pzprxs', 'pzplus'].includes(getPuzzleSource(value)) && hasConcretePuzzlePayload(value);
+}
+
 export function getPuzzleSource(value) {
   const url = parseTrustedPuzzleUrl(value);
   if (!url) return '';

@@ -41,7 +41,7 @@ test('four areas, link supplementation, date reservations, three-person audits a
   assert.equal(create.body.puzzle.assignedDate,null);
   assert.equal(create.body.puzzle.penpaSolveUrl,'');
   assert.equal((await request(`${url}/assignment`,'POST',{assignedDate:'2028-02-29',expectedEditVersion:1,expectedReviewRound:1})).status,409);
-  for (const user of ['a','b','c']) assert.equal((await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:'support',expectedReviewRound:1},user)).status,200);
+  for (const [user,vote] of [['a',2],['b',1],['c',0]]) assert.equal((await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote,expectedReviewRound:1},user)).status,200);
   let latest=(await request(url)).body.puzzle;
   assert.equal(latest.calendarArea,'allocation');
   assert.equal(latest.quality.errors.filter(e=>!e.ignored).length,2);
@@ -65,7 +65,7 @@ test('four areas, link supplementation, date reservations, three-person audits a
   // Filling the independent URLs resets only the drawing audit; voting and solving records remain.
   latest=restored.body.puzzle;
   const fill=await request(url,'PATCH',{penpaEditUrl:'https://penpa-edit.com/?m=edit&p=diagram',penpaSolveUrl:'https://penpa-edit.com/?m=solve&p=diagram',puzzlinkUrl:'',expectedEditVersion:latest.editVersion,expectedReviewRound:latest.reviewRound});
-  assert.equal(fill.status,200);assert.equal(fill.body.puzzle.userVote,null);assert.equal(fill.body.puzzle.review.netSupport,3);
+  assert.equal(fill.status,200);assert.equal(fill.body.puzzle.userVote,null);assert.equal(fill.body.puzzle.review.totalScore,3);
   assert.equal(fill.body.puzzle.penpaRevision,2);assert.equal(fill.body.puzzle.quality.penpa.approvalCount,0);
   assert.equal(fill.body.puzzle.quality.errors.length,0);
   latest=fill.body.puzzle;
@@ -74,7 +74,7 @@ test('four areas, link supplementation, date reservations, three-person audits a
   // A second puzzle cannot reserve an occupied date, including concurrent attempts.
   const second=await request('/api/calendar/puzzles','POST',{title:'Second',source:'puzz.link',ruleId:rule.id,inputMode:'external',puzzlinkUrl:puzz});
   const secondUrl=`/api/calendar/puzzles/${second.body.puzzle.number}`;
-  for (const user of ['a','b','c']) await request(`${secondUrl}/complete-rating`,'POST',{difficulty:3,tags:[],vote:'support',expectedReviewRound:1},user);
+  for (const [user,vote] of [['a',2],['b',1],['c',0]]) await request(`${secondUrl}/complete-rating`,'POST',{difficulty:3,tags:[],vote,expectedReviewRound:1},user);
   const secondLatest=(await request(secondUrl)).body.puzzle;
   assert.equal((await request(`${secondUrl}/assignment`,'POST',{assignedDate:'2028-02-29',expectedEditVersion:secondLatest.editVersion,expectedReviewRound:1})).status,409);
   assert.equal((await request(`${url}/assignment`,'POST',{assignedDate:'2028-02-30',expectedEditVersion:latest.editVersion,expectedReviewRound:1})).status,400);
@@ -92,9 +92,11 @@ test('four areas, link supplementation, date reservations, three-person audits a
   latest=(await request(url)).body.puzzle;
   const reserved=await request(`${url}/assignment`,'POST',{assignedDate:'2028-03-03',expectedEditVersion:latest.editVersion,expectedReviewRound:1});
   assert.equal(reserved.status,200);
-  const withdrawn=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:'oppose',expectedReviewRound:1});
-  assert.equal(withdrawn.body.puzzle.calendarArea,'review');assert.equal(withdrawn.body.puzzle.assignedDate,null);
-  const supportedAgain=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:'support',expectedReviewRound:1});
+  const withdrawn=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:-2,expectedReviewRound:1});
+  assert.equal(withdrawn.body.puzzle.calendarArea,'allocation');assert.equal(withdrawn.body.puzzle.assignedDate,'2028-03-03');
+  const secondWithdrawal=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:-2,expectedReviewRound:1},'a');
+  assert.equal(secondWithdrawal.body.puzzle.calendarArea,'review');assert.equal(secondWithdrawal.body.puzzle.assignedDate,null);
+  const supportedAgain=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:2,expectedReviewRound:1});
   assert.equal(supportedAgain.body.puzzle.calendarArea,'allocation');
   const veto=await request(`${url}/complete-rating`,'POST',{difficulty:3,tags:[],vote:'veto',expectedReviewRound:1},'d');
   assert.equal(veto.body.puzzle.calendarArea,'leftover');assert.equal(veto.body.puzzle.assignedDate,null);

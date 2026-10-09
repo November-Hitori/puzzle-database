@@ -28,4 +28,4 @@
 
 ## 自动化发布
 
-生产发布仓库为 `Sigmit64/puzzle-database`，详见 [CI/CD](ci-cd.md)。受保护的 `main` 要求独立 PR 审查以及完整 CI 通过；Codex 执行的代码变更继续使用上述独立 reviewer 验收。GitHub Actions 自动完成测试、桌面浏览器验收、只读发行包预检及已验收制品的发布，无需重复申请部署确认。只给生产部署任务提供环境 Secrets；PR 和上游仓库的任务不能取得部署凭据。
+生产发布仓库为 `Sigmit64/puzzle-database`，详见 [CI/CD](ci-cd.md)。受保护的 `main` 要求通过 PR 提交并且完整 CI 通过，不额外要求 GitHub 人工批准；Codex 执行的代码变更仍须由独立 GPT-6 Luna high reviewer 验收，并通过上述本地测试与打包门槛。GitHub Actions 自动完成测试、桌面浏览器验收、只读发行包预检及已验收制品的发布，无需重复申请部署确认。只给生产部署任务提供环境 Secrets；PR 和上游仓库的任务不能取得部署凭据。

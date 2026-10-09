@@ -8,9 +8,9 @@ import {
   addCalendarPuzzle, addFolder, addPuzzle, addPuzzleTag, addRule, calendarPuzzleExists,
   authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
-  getRules, getTags, registerAccountWithGate, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
+  getRules, getTags, registerAccountWithGate, renameAccount, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
   updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
-  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
+  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
 } from './db.mjs';
 import { getPenpaGuidelines } from './penpa-guidelines.mjs';
 import { normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
@@ -18,7 +18,7 @@ import { getPuzzleSource, parseTrustedPuzzleUrl, TRUSTED_PUZZLE_FRAME_SOURCES } 
 import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-policy.mjs';
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
-import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES, CALENDAR_APPROVAL_NET_SUPPORT, normalizeCalendarReviewInput } from './calendar-review-policy.mjs';
+import {CALENDAR_REVIEW_TAGS,CALENDAR_REVIEW_VOTES,CALENDAR_MINIMUM_SCORE_COUNT,normalizeCalendarReviewInput} from './calendar-review-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir,'data');
@@ -239,6 +239,15 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   const sessionResult=await handleSession(request,response,pathname,trustLoopbackProxy); if (sessionResult!==null) return;
   const user=currentUser(request); if (!user) return sendJson(response,401,{error:'authentication required'});
   if (['POST','PATCH','PUT','DELETE'].includes(request.method) && !sameOrigin(request,trustLoopbackProxy)) return sendJson(response,403,{error:'same-origin request required'});
+  if (request.method==='PATCH' && pathname==='/api/account/username') {
+    const input=await readJson(request,4096);
+    const normalized=normalizeUsername(input.username);
+    if (!normalized||!normalizeUsername(input.expectedUsername)||Object.keys(input).some(key=>!['username','expectedUsername'].includes(key))) return sendJson(response,400,{error:'用户名需为 2–32 个字符，可使用字母、数字、下划线和连字符；请提供当前用户名'});
+    const result=renameAccount(user.id,normalized.username,normalized.key,input.expectedUsername);
+    if (result.error==='inactive') return sendJson(response,401,{error:'authentication required'});
+    if (result.error) return sendJson(response,409,{error:result.error==='duplicate'?'该用户名已被使用，请换一个':'用户名已变化，请刷新后重试',reason:result.error});
+    return sendJson(response,200,result);
+  }
   if (request.method==='GET' && pathname==='/api/puzzles') return sendJson(response,200,{puzzles:getPuzzles(user.id)});
   if (request.method==='GET' && pathname==='/api/folders') return sendJson(response,200,{folders:getFolders()});
   if (request.method==='GET' && pathname==='/api/collections') return sendJson(response,200,{collections:getCollections()});
@@ -247,7 +256,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && collectionMatch) { const collection=getCollection(Number(collectionMatch[1]),user.id); return collection?sendJson(response,200,{collection}):sendJson(response,404,{error:'collection not found'}); }
 
   if (request.method==='GET' && pathname==='/api/rules') return sendJson(response,200,{rules:getRules(user.id)});
-  if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,approvalNetSupport:CALENDAR_APPROVAL_NET_SUPPORT});
+  if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,minimumScoreCount:CALENDAR_MINIMUM_SCORE_COUNT,approvalAverageGreaterThan:0});
   if (request.method==='GET' && pathname==='/api/inbox') {
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
     const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before');
@@ -344,6 +353,24 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     return sendJson(response,201,{...created,puzzles});
   }
   const assignmentMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/assignment$/);
+  const sharedPenpaMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)\/penpa-links$/);
+  if (request.method==='PATCH' && sharedPenpaMatch) {
+    const input=await readJson(request);
+    if (!['penpaEditUrl','penpaSolveUrl'].some(key=>Object.hasOwn(input,key))
+      ||Object.keys(input).some(key=>!['penpaEditUrl','penpaSolveUrl','expectedEditVersion','expectedReviewRound'].includes(key))
+      ||!Number.isSafeInteger(input.expectedEditVersion)||input.expectedEditVersion<1
+      ||!Number.isSafeInteger(input.expectedReviewRound)||input.expectedReviewRound<1) return sendJson(response,400,{error:'只可提交 Penpa 编辑或解题链接，并需提供当前题目版本'});
+    for (const key of ['penpaEditUrl','penpaSolveUrl']) if (Object.hasOwn(input,key)&&!validText(input[key],4096)) return sendJson(response,400,{error:'invalid Penpa link'});
+    const current=getCalendarPuzzle(Number(sharedPenpaMatch[1]),user.id);
+    if (!current) return sendJson(response,404,{error:'puzzle not found'});
+    if (current.calendarArea!=='allocation') return sendJson(response,409,{error:'只有待分配区题目允许共同补充 Penpa 链接'});
+    const links=normalizeCalendarLinks({...input,inputMode:current.inputMode},current);
+    if (links.error) return sendJson(response,400,{error:links.error});
+    const result=updateCalendarPenpaLinks(Number(sharedPenpaMatch[1]),user.id,input);
+    if (result.error==='forbidden') return sendJson(response,403,{error:'authentication required'});
+    if (result.error) return sendJson(response,409,{error:'题目版本或所在区域已变化，请刷新后重试',reason:result.error});
+    return sendJson(response,200,result);
+  }
   if (assignmentMatch&&request.method==='POST') {
     const input=await readJson(request);
     if (!Object.hasOwn(input,'assignedDate')||!validDate(input.assignedDate)||!Number.isSafeInteger(input.expectedEditVersion)||input.expectedEditVersion<1||!Number.isSafeInteger(input.expectedReviewRound)||input.expectedReviewRound<1) return sendJson(response,400,{error:'a valid assignedDate and current versions are required'});
