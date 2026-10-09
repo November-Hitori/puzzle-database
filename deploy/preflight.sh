@@ -4,7 +4,14 @@ archive="$1"
 runtime="$2"
 python3 "$(dirname -- "$0")/release_archive.py" verify "$archive"
 preflight_dir=$(mktemp -d /tmp/puzarchive-release-preflight.XXXXXX)
-trap 'rm -rf "$preflight_dir"' EXIT
+cleanup() {
+  if [ "${PUZARCHIVE_PREFLIGHT_USE_SUDO:-false}" = true ]; then
+    sudo -n rm -rf -- "$preflight_dir"
+  else
+    rm -rf -- "$preflight_dir"
+  fi
+}
+trap cleanup EXIT
 mkdir -m 0755 "$preflight_dir/app"
 mkdir -m 0700 "$preflight_dir/state"
 tar -xf "$archive" -C "$preflight_dir/app"
