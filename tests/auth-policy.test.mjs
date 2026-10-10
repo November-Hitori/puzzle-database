@@ -11,6 +11,10 @@ test('username policy normalizes NFKC and compares case-insensitively', () => {
 });
 
 test('password policy counts Unicode code points and applies the UTF-8 byte ceiling', () => {
+  assert.equal(validateAccountPassword('a'.repeat(7)), false);
+  assert.equal(validateAccountPassword('a'.repeat(8)), true);
+  assert.equal(validateAccountPassword('😀'.repeat(7)), false);
+  assert.equal(validateAccountPassword('😀'.repeat(8)), true);
   assert.equal(validateAccountPassword('密码 is long enough'), true);
   assert.equal(validateAccountPassword('短密码'), false);
   assert.equal(validateAccountPassword('😀'.repeat(ACCOUNT_PASSWORD_POLICY.maxCodePoints)), true);

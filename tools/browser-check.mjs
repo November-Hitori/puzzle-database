@@ -19,7 +19,7 @@ process.env.PUZARCHIVE_DB_PATH = path.join(directory, 'test.sqlite');
 process.env.PUZARCHIVE_USERS_PATH = path.join(directory, 'users.json');
 process.env.PUZARCHIVE_PENPA_GUIDELINES_PATH = path.join(directory, 'penpa.md');
 const inviteCode = randomBytes(24).toString('base64url');
-const password = 'isolated browser test password';
+const password = 'testpass';
 fs.writeFileSync(process.env.PUZARCHIVE_USERS_PATH, JSON.stringify([{ id: 'browser-owner', name: 'Browser Owner', accessCode: inviteCode }]), { mode: 0o600 });
 fs.copyFileSync(path.join(root, 'docs', 'penpa.md'), process.env.PUZARCHIVE_PENPA_GUIDELINES_PATH);
 const { createServer } = await import('../server.mjs');
@@ -97,10 +97,14 @@ try {
   await page.goto(base); await page.locator('#authUsername').waitFor();
   await page.locator('[data-auth-mode="register"]').click();
   await page.locator('#authInviteCode').fill(inviteCode); await page.locator('#authUsername').fill('BrowserOwner');
+  await page.locator('#authPassword').fill(password.slice(0, -1)); await page.locator('#authPasswordConfirm').fill(password.slice(0, -1));
+  await page.locator('#authForm [type="submit"]').click();
+  assert.equal(await page.locator('#authError').textContent(), '密码需为 8–128 个字符，最多 512 字节。');
+  assert.equal(requests.filter((entry) => entry.path === '/api/register').length, 0);
   await page.locator('#authPassword').fill(password); await page.locator('#authPasswordConfirm').fill(password);
   await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
   assert.equal((await request('/api/calendar/puzzles')).status, 401);
-  console.log('PASS: Chromium registration, real session cookie, private bootstrap and anonymous API boundary');
+  console.log('PASS: Chromium rejects seven-character passwords, registers eight-character passwords, real session cookie, private bootstrap and anonymous API boundary');
 
   // The calendar must remain usable while the full rule catalog is fetched on demand.
   assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 0);

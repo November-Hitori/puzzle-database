@@ -87,7 +87,7 @@ The apply step takes one `BEGIN IMMEDIATE` transaction, skips existing normalize
 
 On the first startup with the account-auth release, the service migrates the current `/var/lib/puzarchive/trusted-users.json` into SQLite and invalidates legacy invitation-only sessions. The file must contain exactly one configured member; startup fails clearly if it contains more. The first successful registration claims that member's UUID and display name, preserving its existing puzzle, completion, and rating history. Later registrations get new identities. The shared registration code is reusable and is stored only as a hash in SQLite. After migration the JSON file is a private backup, not an account or registration-control interface; editing it no longer adds, removes, or rotates accounts or the code.
 
-Login uses a unique username and password; no email verification is required. Usernames are NFKC-normalized and case-insensitive for uniqueness. Passwords require 12–128 Unicode characters (maximum 512 UTF-8 bytes) and are stored as salted scrypt hashes. Sessions are private HttpOnly cookies.
+Login uses a unique username and password; no email verification is required. Usernames are NFKC-normalized and case-insensitive for uniqueness. Passwords require 8–128 Unicode characters (maximum 512 UTF-8 bytes) and are stored as salted scrypt hashes. Sessions are private HttpOnly cookies.
 
 Run account administration locally on the server. These commands never put a registration code in shell arguments; rotation prints a newly generated shared code once, which must be conveyed privately:
 

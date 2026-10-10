@@ -123,11 +123,13 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(rotatedCode.response.status,400);
   const removedCode=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:'removed-member-invite',username:'Removed',password:'correct horse battery staple'})});
   assert.equal(removedCode.response.status,400);
-  const tooShort=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:members[0].accessCode,username:'Ada',password:'short'})});
+  const minimumPassword='testpass';
+  const tooShort=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:members[0].accessCode,username:'Ada',password:minimumPassword.slice(0,-1)})});
   assert.equal(tooShort.response.status,400);
+  assert.equal(tooShort.body.error,'password must be 8–128 characters and at most 512 UTF-8 bytes');
   assert.equal(database.prepare('SELECT pending_legacy_user_id FROM registration_gate WHERE id=1').get().pending_legacy_user_id,'trusted-1');
   const gateHash=database.prepare('SELECT token_hash FROM registration_gate WHERE id=1').get().token_hash;
-  const legacyClaimRace=await Promise.all(['Ada','Ａda'].map((username)=>request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:members[0].accessCode,username,password:'correct horse battery staple'})})));
+  const legacyClaimRace=await Promise.all(['Ada','Ａda'].map((username)=>request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:members[0].accessCode,username,password:minimumPassword})})));
   assert.deepEqual(legacyClaimRace.map((result)=>result.response.status).sort(),[201,409]);
   const adaRegistration=legacyClaimRace.find((result)=>result.response.status===201);
   assert.equal(adaRegistration.body.user.id,'trusted-1');
@@ -144,7 +146,7 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal(wrongPassword.response.status,401);
   const oldLogin=await request('/api/session',{method:'POST',body:JSON.stringify({accessCode:members[0].accessCode})});
   assert.equal(oldLogin.response.status,400);
-  const adaLogin=await request('/api/session',{method:'POST',body:JSON.stringify({username:'ada',password:'correct horse battery staple'})});
+  const adaLogin=await request('/api/session',{method:'POST',body:JSON.stringify({username:'ada',password:minimumPassword})});
   assert.equal(adaLogin.response.status,200);
   assert.equal(adaLogin.body.user.id,'trusted-1');
   assert.equal(adaLogin.body.user.username,'Ada');

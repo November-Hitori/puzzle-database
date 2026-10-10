@@ -190,7 +190,7 @@ async function handleRegistration(request,response,pathname,trustLoopbackProxy) 
   const input=await readJson(request,16*1024);
   const normalized=normalizeUsername(input.username);
   if (!normalized) return sendJson(response,400,{error:'username must be 2–32 letters, numbers, underscores, or hyphens'});
-  if (!validateAccountPassword(input.password)) return sendJson(response,400,{error:'password must be 12–128 characters and at most 512 UTF-8 bytes'});
+  if (!validateAccountPassword(input.password)) return sendJson(response,400,{error:'password must be 8–128 characters and at most 512 UTF-8 bytes'});
   if (typeof input.inviteCode!=='string' || input.inviteCode.length<16 || input.inviteCode.length>256) return sendJson(response,400,{error:'invitation code is required'});
 
   let passwordHash;

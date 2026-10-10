@@ -1302,7 +1302,7 @@ function authFieldError(username, password, confirmPassword, inviteCode) {
   if (!username) return '请输入用户名。';
   if (!normalizeUsername(username)) return '用户名需为 2–32 个字符，可使用字母、数字、下划线和连字符。';
   if (state.authMode === 'register' && !inviteCode) return '请输入邀请码。';
-  if (state.authMode === 'register' && !validateAccountPassword(password)) return '密码需为 12–128 个字符，最多 512 字节。';
+  if (state.authMode === 'register' && !validateAccountPassword(password)) return '密码需为 8–128 个字符，最多 512 字节。';
   if (!password) return '请输入密码。';
   if (state.authMode === 'register' && password !== confirmPassword) return '两次输入的密码不一致。';
   return '';

@@ -35,7 +35,7 @@ API 包括：
 - `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读
 - `/api/puzzles`、`/api/folders`、`/api/collections`、`/api/tags`：现有公共题库管理 API，只包含公共题目
 
-共享邀请码可注册多个独立账号。用户名按 Unicode NFKC 规范化并以小写键保证唯一，长度为 2–32 个 Unicode 字符（字母、数字、下划线或连字符）；密码为 12–128 个 Unicode 字符且不超过 512 UTF-8 字节。密码使用带随机盐的 scrypt 哈希存储（N=131072、r=8、p=1），服务不保存明文密码；浏览器只持有 HttpOnly、SameSite=Strict 的会话 Cookie。提交操作校验同源来源。用环境变量 `PUZARCHIVE_DB_PATH`、`PUZARCHIVE_USERS_PATH` 可指定隔离数据库和成员配置路径（也用于测试）。
+共享邀请码可注册多个独立账号。用户名按 Unicode NFKC 规范化并以小写键保证唯一，长度为 2–32 个 Unicode 字符（字母、数字、下划线或连字符）；密码为 8–128 个 Unicode 字符且不超过 512 UTF-8 字节。密码使用带随机盐的 scrypt 哈希存储（N=131072、r=8、p=1），服务不保存明文密码；浏览器只持有 HttpOnly、SameSite=Strict 的会话 Cookie。提交操作校验同源来源。用环境变量 `PUZARCHIVE_DB_PATH`、`PUZARCHIVE_USERS_PATH` 可指定隔离数据库和成员配置路径（也用于测试）。
 
 评分在数据库中按用户保存：`puzzle_ratings(puzzle_id, user_id, logic, intuition, enjoyment)`。题库的三项评分由 SQL `AVG` 聚合产生，而不是由浏览器计算。
 
