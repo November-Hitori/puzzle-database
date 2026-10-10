@@ -27,6 +27,12 @@ if mode == 'debug':
     sys.stderr.write('debug1: Entering interactive session.\\n')
     sys.stderr.write('debug2: channel 0: open confirm rwindow 2097152 rmax 32768\\n')
     sys.stderr.write('debug2: shell request accepted on channel 0\\n')
+    sys.stderr.write('debug3: receive packet: type 81\\n')
+    sys.stderr.write('debug3: receive packet: type 82\\n')
+    sys.stderr.write('debug2: channel 0: rcvd adjust 131072\\n')
+    sys.stderr.write('debug2: channel 0: rcvd adjust 262144\\n')
+    sys.stderr.write('debug3: receive packet: type 82 /SENSITIVE_INLINE_PATH\\n')
+    sys.stderr.write('debug3: sign_and_send_pubkey: SENSITIVE_PRIVATE_SIGNATURE\\n')
     sys.stderr.write('debug1: Reading configuration data /SENSITIVE_CONFIG_PATH\\n' * 2000)
     sys.stderr.write('debug1: Server host key: ED25519 SHA256:SENSITIVE_FINGERPRINT\\n')
     sys.stderr.write('SENSITIVE_PRIVATE_KEY_CONTENTS' * 400 + '\\n')
@@ -38,6 +44,7 @@ if mode == 'safe-errors':
     sys.stderr.write('debug1: Reading configuration data /SENSITIVE_CONFIG_PATH\\n')
     sys.stderr.write('private.invalid: Permission denied (publickey).\\n')
     sys.stderr.write('Host key verification failed.\\n')
+    sys.stderr.write('Timeout, server private.invalid not responding.\\n')
     sys.stderr.write('deployment_gateway_failed=true')
     sys.stderr.flush()
     sys.exit(255)
@@ -47,6 +54,13 @@ if mode == 'early-close':
 if mode == 'hold-input':
     print('fixture_transport_ready=true', flush=True)
     signal.pause()
+elif mode == 'hold-controls':
+    print('fixture_transport_ready=true', flush=True)
+    while True:
+        sys.stderr.write('debug3: receive packet: type 82\\n')
+        sys.stderr.write('debug2: channel 0: rcvd adjust 131072\\n')
+        sys.stderr.flush()
+        time.sleep(0.05)
 else:
     (root / 'received.bin').write_bytes(sys.stdin.buffer.read())
     print('fixture_eof_seen=true', flush=True)
@@ -116,7 +130,8 @@ class CiSendTests(unittest.TestCase):
                                   capture_output=True, timeout=10)
         self.assertEqual(verified.returncode, 0, verified.stderr.decode())
         args = json.loads((self.root / 'transport.json').read_text())['args']
-        self.assertEqual(args, ['-C', '-vv', '-F', str(self.config), 'puzarchive-production'])
+        self.assertEqual(args, ['-C', '-vvv', '-o', 'ServerAliveInterval=15',
+                                '-o', 'ServerAliveCountMax=3', '-F', str(self.config), 'puzarchive-production'])
         self.assertIn(b'release_payload_bytes=' + str(len(payload)).encode(), result.stdout)
         self.assertIn(b'fixture_eof_seen=true', result.stdout)
         self.assertIn(b'local_stdin_closed=true', result.stdout)
@@ -172,8 +187,13 @@ class CiSendTests(unittest.TestCase):
                       'session_channel_open', 'session_request_accepted'):
             self.assertIn(b'ssh_phase=' + phase.encode(), result.stdout)
         output = result.stdout + result.stderr
-        for private in (b'private.invalid', b'192.0.2.1', b'SENSITIVE_', b'debug1:', b'debug2:'):
+        for private in (b'private.invalid', b'192.0.2.1', b'SENSITIVE_', b'debug1:', b'debug2:', b'debug3:'):
             self.assertNotIn(private, output)
+        for counter in ('ssh_control_reply_count', 'ssh_window_adjust_count'):
+            values = [int(line.split(b'=', 1)[1]) for line in result.stdout.splitlines()
+                      if line.startswith(counter.encode() + b'=')]
+            self.assertEqual(values, [0, 1, 2])
+        self.assertNotIn(b'ssh_error=', result.stdout)
         self.assertIn(b'local_stdin_closed=true', result.stdout)
         self.assert_transport_stopped()
 
@@ -190,9 +210,25 @@ class CiSendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'ssh_error=authentication_failed', result.stdout)
         self.assertIn(b'ssh_error=host_key_verification_failed', result.stdout)
+        self.assertIn(b'ssh_error=server_not_responding', result.stdout)
         self.assertIn(b'deployment_gateway_failed=true', result.stdout)
         self.assertNotIn(b'SENSITIVE_', result.stdout + result.stderr)
         self.assertNotIn(b'private.invalid', result.stdout + result.stderr)
+        self.assert_transport_stopped()
+
+    def test_control_replies_and_window_updates_do_not_extend_a_stalled_upload(self):
+        started = time.monotonic()
+        result = self.send(self.archive(), 'hold-controls', idle_seconds=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        for counter in ('ssh_control_reply_count', 'ssh_window_adjust_count'):
+            values = [int(line.split(b'=', 1)[1]) for line in result.stdout.splitlines()
+                      if line.startswith(counter.encode() + b'=')]
+            self.assertGreater(values[-1], 2)
+        self.assertIn(b'release_transfer_idle_timeout=true', result.stdout)
+        self.assertNotIn(b'local_stdin_closed=true', result.stdout)
+        self.assertNotIn(b'ssh_error=', result.stdout)
+        self.assertNotIn(b'debug3:', result.stdout + result.stderr)
         self.assert_transport_stopped()
 
     def test_quiet_remote_execution_after_eof_does_not_use_the_upload_idle_deadline(self):

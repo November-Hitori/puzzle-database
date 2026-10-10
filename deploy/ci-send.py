@@ -32,6 +32,7 @@ ERRORS = (
     (r'No .* host key is known for .* and you have requested strict checking\.', 'host_key_untrusted'),
     (r'Permission denied \([^)]*\)\.|Authentication failed\.', 'authentication_failed'),
     (r'Connection timed out|Operation timed out', 'connection_timeout'),
+    (r'^Timeout, server .* not responding\.$', 'server_not_responding'),
     (r'Connection refused', 'connection_refused'),
     (r'Connection reset by peer', 'connection_reset'),
     (r'Connection .*closed by remote host', 'connection_closed'),
@@ -42,8 +43,18 @@ ERRORS = (
 )
 
 
-def diagnostic(line, observed):
+def diagnostic(line, observed, counters):
     # SSH debugging includes paths and fingerprints: never forward its raw text.
+    counter = None
+    if re.fullmatch(r'debug3: receive packet: type (?:81|82)', line):
+        # Both global success and failure replies demonstrate control traffic.
+        counter = 'ssh_control_reply_count'
+    elif re.fullmatch(r'debug2: channel \d+: rcvd adjust \d+', line):
+        counter = 'ssh_window_adjust_count'
+    if counter:
+        counters[counter] += 1
+        print(counter + '=' + str(counters[counter]), flush=True)
+        return
     if line == 'deployment_gateway_failed=true':
         print(line, flush=True)
     for patterns, name in ((PHASES, 'ssh_phase'), (ERRORS, 'ssh_error')):
@@ -54,11 +65,11 @@ def diagnostic(line, observed):
                 print(marker, flush=True)
 
 
-def consume_diagnostics(block, pending, observed, discarding):
+def consume_diagnostics(block, pending, observed, counters, discarding):
     for byte in block:
         if byte == 10:
             if not discarding:
-                diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed)
+                diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed, counters)
             pending.clear()
             discarding = False
         elif not discarding:
@@ -81,18 +92,22 @@ try:
     metadata = validate_archive(archive)
     payload = archive.read_bytes()
     header = json.dumps({'commit': metadata['commit'], 'sha256': hashlib.sha256(payload).hexdigest()}).encode() + b'\n'
-    process = subprocess.Popen(['ssh', '-C', '-vv', '-F', sys.argv[2], 'puzarchive-production'],
+    process = subprocess.Popen(['ssh', '-C', '-vvv', '-o', 'ServerAliveInterval=15',
+                                '-o', 'ServerAliveCountMax=3', '-F', sys.argv[2], 'puzarchive-production'],
                                stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 except Exception:
     sys.exit('release_sender_exit_code=1')
 
 sender_exit_code = 0
 pending, observed = bytearray(), set()
+counters = {'ssh_control_reply_count': 0, 'ssh_window_adjust_count': 0}
 discarding = False
 try:
     print('release_transfer_started=true', flush=True)
     print('release_payload_bytes=' + str(len(payload)), flush=True)
     print('ssh_phase=connecting', flush=True)
+    for counter in counters:
+        print(counter + '=0', flush=True)
     wire = memoryview(header + payload)
     offset, reported = 0, -1
     last_write = last_report = time.monotonic()
@@ -135,11 +150,11 @@ try:
                         continue
                     if not block:
                         if pending and not discarding:
-                            diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed)
+                            diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed, counters)
                         selector.unregister(process.stderr)
                         process.stderr.close()
                         continue
-                    discarding = consume_diagnostics(block, pending, observed, discarding)
+                    discarding = consume_diagnostics(block, pending, observed, counters, discarding)
     process.wait()
 except BaseException as error:
     process.kill()
@@ -158,9 +173,9 @@ finally:
         # Preserve buffered errors even when a broken input pipe was selected first.
         os.set_blocking(process.stderr.fileno(), False)
         while block := os.read(process.stderr.fileno(), 4096):
-            discarding = consume_diagnostics(block, pending, observed, discarding)
+            discarding = consume_diagnostics(block, pending, observed, counters, discarding)
         if pending and not discarding:
-            diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed)
+            diagnostic(pending.decode('utf-8', 'replace').rstrip('\r'), observed, counters)
     except (OSError, ValueError):
         pass
     process.stderr.close()
