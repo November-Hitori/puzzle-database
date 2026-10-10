@@ -73,6 +73,23 @@ async function duplicateDisabledClick(selector) {
   await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
 }
 
+async function chooseAccountAction(selector) {
+  await page.locator('#accountMenuButton').click();
+  await page.locator(selector).click();
+}
+async function assertAccountMenuReachable() {
+  await page.locator('#accountMenu').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#accountMenuButton').getAttribute('aria-expanded'), 'true');
+  assert.equal(await page.locator('#accountMenu').evaluate((menu) => {
+    const bounds = menu.getBoundingClientRect();
+    return bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight
+      && [...menu.querySelectorAll('button')].every((button) => {
+        const rect = button.getBoundingClientRect();
+        return button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+      });
+  }), true, 'account menu stays in the viewport and outside sidebar clipping');
+}
+
 try {
   browser = await chromium.launch({ executablePath: executable, env: browserEnv, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
@@ -102,9 +119,29 @@ try {
   assert.equal(await page.locator('#authError').textContent(), '密码需为 8–128 个字符，最多 512 字节。');
   assert.equal(requests.filter((entry) => entry.path === '/api/register').length, 0);
   await page.locator('#authPassword').fill(password); await page.locator('#authPasswordConfirm').fill(password);
-  await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
+  await page.locator('#authForm [type="submit"]').click(); await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').waitFor();
   assert.equal((await request('/api/calendar/puzzles')).status, 401);
   console.log('PASS: Chromium rejects seven-character passwords, registers eight-character passwords, real session cookie, private bootstrap and anonymous API boundary');
+
+  assert.equal(await page.locator('.primary-nav').count(), 1);
+  assert.equal(await page.locator('.calendar-view-switch').count(), 0);
+  assert.equal(await page.locator('.topbar #inboxButton, .topbar #changeUsernameButton').count(), 0);
+  assert.equal(await page.locator('.sidebar-bottom #inboxButton, .sidebar-bottom #accountMenuButton').count(), 2);
+  assert.equal(await page.locator('.primary-nav [data-route-link="finished"] .nav-icon svg').count(), 1);
+  assert.equal(await page.locator('#profileButton').evaluate((node) => node.tagName), 'DIV');
+  const logoutRequestsBeforeMenu = requests.filter((entry) => entry.method === 'DELETE' && entry.path === '/api/session').length;
+  await page.locator('#profileButton').click();
+  assert.equal(await page.evaluate(() => document.body.dataset.authState), 'authenticated');
+  await page.locator('#accountMenuButton').click(); await assertAccountMenuReachable();
+  await page.locator('#accountMenuButton').click(); await page.locator('#accountMenu').waitFor({ state: 'hidden' });
+  await page.locator('#accountMenuButton').click(); await assertAccountMenuReachable();
+  await page.keyboard.press('Escape'); await page.locator('#accountMenu').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#accountMenuButton').getAttribute('aria-expanded'), 'false');
+  await page.locator('#accountMenuButton').click(); await assertAccountMenuReachable();
+  await page.locator('.page-heading h1').click(); await page.locator('#accountMenu').waitFor({ state: 'hidden' });
+  assert.equal(requests.filter((entry) => entry.method === 'DELETE' && entry.path === '/api/session').length, logoutRequestsBeforeMenu);
+  assert.equal(await page.evaluate(() => document.body.dataset.authState), 'authenticated');
+  console.log('PASS: one sidebar navigation, calendar icon, passive profile and reachable account menu toggle, Escape and outside-click closure without logout');
 
   // The calendar must remain usable while the full rule catalog is fetched on demand.
   assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 0);
@@ -112,7 +149,7 @@ try {
   await page.locator('#addCalendarPuzzleButton').click();
   await page.waitForFunction(() => document.querySelector('#requiredRulesError')?.textContent.includes('native simulated outage'));
   assert.ok((await page.locator('#requiredRulesError').textContent()).includes('native simulated outage'));
-  assert.ok(await page.locator('.calendar-view-switch').isVisible());
+  assert.ok(await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').isVisible());
   assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 1);
   interception = { method: 'GET', path: '/api/rules', delay: 900 };
   await page.locator('#retryRequiredRulesButton').click();
@@ -125,7 +162,7 @@ try {
   await page.locator('#modalBackdrop .modal-cancel').click();
   await page.locator('.rule-catalog').waitFor();
   console.log('PASS: lazy rule catalog, calendar availability, submission loading/error/retry, shared request and guidelines');
-  await navigate('calendar', '.calendar-view-switch');
+  await navigate('calendar', '.primary-nav .nav-item.active[data-route-link="calendar"]');
 
   const row = `.calendar-row[data-puzzle-route="calendar-puzzle-${spoiler.number}"]`;
   assert.equal(await page.locator(`${row} .spoiler-content`).evaluate((node) => node.hidden), true);
@@ -206,7 +243,7 @@ try {
   await screenshot('calendar-rules-browser-desktop.png');
   console.log('PASS: native rule audit local update, prototype keyboard search, error ignore and restoration');
 
-  await navigate('calendar', '.calendar-view-switch'); await page.locator('#addCalendarPuzzleButton').click();
+  await navigate('calendar', '.primary-nav .nav-item.active[data-route-link="calendar"]'); await page.locator('#addCalendarPuzzleButton').click();
   await page.locator('#submissionRuleSearch').fill('Standard'); await page.locator('#submissionRuleSearch').press('ArrowDown'); await page.locator('#submissionRuleSearch').press('Enter');
   await page.locator('#newPuzzleTitle').fill('真实浏览器日历题目'); await page.locator('#newPuzzlePuzzlink').fill('https://pzprxs.vercel.app/p?slither/3/3/0000');
   assert.equal(await page.locator('#newPuzzlePenpaEdit').inputValue(), ''); assert.equal(await page.locator('#newPuzzlePenpaSolve').inputValue(), '');
@@ -258,7 +295,7 @@ try {
   await page.locator('#reenterCalendarPuzzleButton').click(); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').calendarArea, 'review');
   interception = { path: '/api/session', method: 'DELETE', delay: 1200 };
-  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
   assert.equal(await page.locator('#authUsername').isDisabled(), true);
   await page.locator('#authUsername').fill('BrowserOwner'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-workflow-panel').waitFor();
   const sessionCookie = (await context.cookies()).find((cookie) => cookie.name === 'puzarchive_session');
@@ -267,34 +304,38 @@ try {
   await navigate('rules', '.rule-catalog');
   interception = { path: `/api/rules/${auditDraft.id}/audits`, delay: 1200 };
   await page.locator(`[data-rule-card="${auditDraft.id}"] [data-rule-audit="approve"][data-audit-item="example"]`).click();
-  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor(); await delay(1600);
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor(); await delay(1600);
   assert.equal(await page.locator('.rule-catalog').count(), 0);
   assert.equal(await page.evaluate(() => document.body.dataset.authState), 'unauthenticated');
   await page.locator('#authUsername').fill('BrowserOwner');await page.locator('#authPassword').fill(password);await page.locator('#authForm [type="submit"]').click();await page.locator('.rule-catalog').waitFor();
-  await page.locator('#changeUsernameButton').click();await page.locator('#newUsername').fill('NativeOne');await page.locator('#saveUsernameButton').click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await chooseAccountAction('#changeUsernameButton');await page.locator('#newUsername').fill('NativeOne');await page.locator('#saveUsernameButton').click();
   await page.waitForFunction(()=>document.querySelector('#usernameEditError').textContent.includes('已被使用'));
   assert.equal(await page.locator('#newUsername').inputValue(),'NativeOne');
   await page.locator('#newUsername').fill('BrowserRenamed');interception={method:'PATCH',path:'/api/account/username',delay:700};
   await page.locator('#saveUsernameButton').click();await duplicateDisabledClick('#saveUsernameButton');
   await page.waitForFunction(()=>document.querySelector('#profileButton strong').textContent==='BrowserRenamed');
   assert.equal(db.database.prepare("SELECT id FROM trusted_users WHERE username_key='browserrenamed'").get().id,'browser-owner');
-  await screenshot('account-username-browser-desktop.png');
-  await page.locator('#profileButton').click();await page.locator('#authUsername').waitFor();
+  await screenshot('account-username-browser-mobile.png');
+  await chooseAccountAction('#loginButton');await page.locator('#authUsername').waitFor();
   await page.locator('#authUsername').fill('BrowserRenamed');await page.locator('#authPassword').fill(password);await page.locator('#authForm [type="submit"]').click();await page.locator('.rule-catalog').waitFor();
   assert.equal(await page.locator('#profileButton strong').textContent(),'BrowserRenamed');
-  console.log('PASS: username duplicate feedback, delayed rename, stable identity and login with unchanged password');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await screenshot('account-username-browser-desktop.png');
+  console.log('PASS: mobile account menu username editing and logout, duplicate feedback, delayed rename, stable identity and login with unchanged password');
 
-  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
   await page.evaluate(() => { window.location.hash = '#calendar'; });
-  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
+  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').waitFor();
   interception = { method: 'GET', path: '/api/rules', delay: 1200 };
   await page.evaluate(() => { window.location.hash = '#rules'; });
   await page.locator('.empty-state').filter({ hasText: '正在加载规则目录' }).waitFor();
-  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor(); await delay(1500);
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor(); await delay(1500);
   assert.equal(await page.evaluate(() => document.body.dataset.authState), 'unauthenticated');
   assert.equal(await page.locator('.rule-catalog').count(), 0);
   await page.evaluate(() => { window.location.hash = '#calendar'; });
-  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
+  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').waitFor();
   assert.equal(await page.locator('.rule-catalog').count(), 0);
   await navigate('rules', '.rule-catalog');
   console.log('PASS: delayed rule response is isolated across logout and subsequent login');

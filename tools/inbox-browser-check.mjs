@@ -115,6 +115,11 @@ async function snapshot(name) {
   await page.screenshot({ path: path.join(screenshots, name), fullPage: true });
 }
 
+async function chooseAccountAction(selector) {
+  await page.locator('#accountMenuButton').click();
+  await page.locator(selector).click();
+}
+
 try {
   const ownerSession = await request('/api/session', 'POST', { username: 'InboxOwner', password });
   assert.equal(ownerSession.status, 200);
@@ -245,13 +250,15 @@ try {
   await tagStarted;
   assert.equal(await tag(topId, 'star').isDisabled(), true);
   await tag(topId, 'star').evaluate((button) => button.click());
-  await page.locator('#changeUsernameButton').click();
+  await chooseAccountAction('#changeUsernameButton');
   assert.equal(await page.locator('#newUsername').count(), 0);
   await page.locator('#toast.show').filter({ hasText: '请等待消息保存完成后再修改用户名' }).waitFor();
+  assert.equal(await page.locator('#accountMenuButton').evaluate((button) => document.activeElement === button), true);
   await waitPressed(topId, 'star', true);
   assert.equal(requests.slice(beforeSave).filter((entry) => entry.method === 'PATCH' && entry.path === `/api/inbox/${topId}/tags`).length, 1);
-  await page.locator('#changeUsernameButton').click();
+  await chooseAccountAction('#changeUsernameButton');
   await page.locator('#newUsername').waitFor();
+  assert.equal(await page.locator('#newUsername').evaluate((input) => document.activeElement === input), true);
   await page.locator('#modalBackdrop .modal-cancel').click();
   for (const name of ['flag', 'bookmark', 'heart']) { await tag(topId, name).click(); await waitPressed(topId, name, true); }
   await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
@@ -260,8 +267,43 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' }); await waitCount(10);
   for (const name of ['flag', 'bookmark', 'heart']) assert.equal(await tag(topId, name).getAttribute('aria-pressed'), 'true');
   await snapshot('inbox-icons-browser-desktop.png');
+  await page.locator('#accountMenuButton').click(); await page.locator('#accountMenu').waitFor({ state: 'visible' });
+  await snapshot('sidebar-account-menu-browser-desktop.png');
+  await page.keyboard.press('Escape'); await page.locator('#accountMenu').waitFor({ state: 'hidden' });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.equal(await page.locator('.sidebar').evaluate((sidebar) => sidebar.getBoundingClientRect().width), 64);
+  for (const selector of ['#inboxButton', '#accountMenuButton']) {
+    assert.equal(await page.locator(selector).isVisible(), true);
+    assert.equal(await page.locator(selector).evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.x >= 0 && rect.y >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+    }), true, 'mobile sidebar keeps inbox and account controls reachable');
+  }
+  await assertGlobalUnread(40);
+  await page.locator('#accountMenuButton').click();
+  await page.locator('#accountMenu').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#accountMenu').evaluate((menu) => {
+    const rect = menu.getBoundingClientRect();
+    return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight
+      && [...menu.querySelectorAll('button')].every((button) => {
+        const bounds = button.getBoundingClientRect();
+        return button.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+      });
+  }), true, 'mobile account menu remains in the viewport and outside sidebar clipping');
+  await snapshot('sidebar-account-menu-browser-mobile.png');
+  await page.keyboard.press('Escape'); await page.locator('#accountMenu').waitFor({ state: 'hidden' });
+  await chooseAccountAction('#changeUsernameButton');
+  assert.equal(await page.locator('#newUsername').evaluate((input) => document.activeElement === input), true);
+  await page.locator('#newUsername').fill('Mobile draft');
+  await page.locator('#modalBackdrop .modal-cancel').click();
+  await page.evaluate(() => { window.location.hash = '#calendar'; });
+  await page.locator('#calendarSearchInput').waitFor();
+  assert.equal(await page.locator('.calendar-view-switch').count(), 0);
+  assert.equal(await page.locator('.primary-nav').count(), 1);
+  await page.locator('#inboxButton').click(); await waitCount(10);
+  assert.equal(new URL(page.url()).hash, '#messages');
+  await assertGlobalUnread(40);
   await snapshot('inbox-icons-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
   for (const name of ['flag', 'bookmark', 'heart']) { await tag(topId, name).click(); await waitPressed(topId, name, false); }
@@ -379,7 +421,7 @@ try {
   await selectFilters('unread', 'tagged', 10);
   const staleRename = intercept({ path: '/api/inbox', match: (url) => hasOffset(10)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged', capture: true, delay: 2000 });
   await page.locator('#refreshInboxButton').click(); await staleRename;
-  await page.locator('#changeUsernameButton').click();
+  await chooseAccountAction('#changeUsernameButton');
   await page.locator('#newUsername').fill('InboxRenamed');
   let finishRename;
   const renameHold = new Promise((resolve) => { finishRename = resolve; });
@@ -421,7 +463,7 @@ try {
   assert.equal(db.database.prepare('SELECT username FROM trusted_users WHERE id=?').get('inbox-owner').username, 'InboxRenamed');
   assert.equal(await page.locator('#changeUsernameButton').isEnabled(), true);
   assert.equal(await page.locator('[data-inbox-tag], [data-inbox-read], #markAllInboxReadButton').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
-  await page.locator('#changeUsernameButton').click(); await page.locator('#newUsername').waitFor();
+  await chooseAccountAction('#changeUsernameButton'); await page.locator('#newUsername').waitFor();
   await page.locator('#modalBackdrop .modal-cancel').click();
   console.log('PASS: pending inbox saves defer username editing; a closed pending rename blocks writes, then retains filters and releases controls after an old response');
 
@@ -429,7 +471,7 @@ try {
   await selectFilters('all', 'all', 10);
   const staleSession = intercept({ path: '/api/inbox', match: hasOffset(40), capture: true, delay: 1300 });
   await page.locator('#inboxPageInput').fill('5'); await page.locator('#jumpInboxPageButton').click(); await staleSession;
-  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
   await login('InboxOther'); await waitCount(1); await assertGlobalUnread(1);
   await delay(1500);
   assert.equal(await item(otherId).count(), 1);

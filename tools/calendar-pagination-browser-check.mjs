@@ -85,10 +85,15 @@ async function visibleNumbers() {
 }
 async function go(view) {
   await page.evaluate((route) => { window.location.hash = route; }, view);
-  await page.locator(`.calendar-view-switch a.active[href="#${view}"]`).waitFor();
+  await page.locator(`.primary-nav .nav-item.active[data-route-link="${view}"]`).waitFor();
   await waitPage(1, Math.min(10, db.getCalendarPage('page-owner', { view }).total));
 }
 async function screenshot(name) { await page.screenshot({ path: path.join(screenshots, name), fullPage: true }); }
+
+async function chooseAccountAction(selector) {
+  await page.locator('#accountMenuButton').click();
+  await page.locator(selector).click();
+}
 
 try {
   browser = await chromium.launch({ executablePath: executable, env: browserEnv, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
@@ -179,7 +184,7 @@ try {
   const detailHold = holdIntercept({ path: `/api/calendar/puzzles/${offPage}` });
   const detailResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/calendar/puzzles/${offPage}` && response.status() === 200);
   await page.locator(`[data-month-puzzle][href="#calendar-puzzle-${offPage}"]`).click(); await detailHold.started;
-  await page.locator('#changeUsernameButton').click(); await page.locator('#newUsername').waitFor();
+  await chooseAccountAction('#changeUsernameButton'); await page.locator('#newUsername').waitFor();
   detailHold.release(); await detailResponse; await page.waitForLoadState('networkidle');
   await page.locator('#modalBackdrop .modal-cancel').click();
   await page.locator('#calendarCommentsList').waitFor({ state: 'attached' });

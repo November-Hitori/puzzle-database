@@ -74,7 +74,10 @@ const app = document.querySelector('#app');
 const modalBackdrop = document.querySelector('#modalBackdrop');
 const modalContent = document.querySelector('#modalContent');
 const toastElement = document.querySelector('#toast');
+const accountMenu = document.querySelector('#accountMenu');
+const accountMenuButton = document.querySelector('#accountMenuButton');
 let toastTimer;
+let accountMenuSessionEpoch = -1;
 const API_REQUEST_TIMEOUT_MS = 20000;
 let privateLoadAttempt = 0;
 let privateLoadController = null;
@@ -224,13 +227,13 @@ function requireRulesForModal(title, openWhenReady) {
   retry.addEventListener('click', attempt);
   void attempt();
 }
-function clearPrivateState() { resetCalendarPagination(); resetInboxPagination(); privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.inboxReadFilter = 'all'; state.inboxTagFilter = 'all'; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; state.usernameRenamePending = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function clearPrivateState() { closeAccountMenu(); resetCalendarPagination(); resetInboxPagination(); privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.inboxReadFilter = 'all'; state.inboxTagFilter = 'all'; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; state.usernameRenamePending = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
 function tagMarkup(tags) { return `<div class="tag-list">${tags.map((tag) => `<span class="tag ${tag === 'Wrong Puzzle' ? 'warning' : tag === 'Example Puzzle' ? 'type' : ''}">${esc(tag)}</span>`).join('')}</div>`; }
 function showToast(message) { if (document.body.dataset.authState !== 'authenticated') return; toastElement.textContent = message; toastElement.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastElement.classList.remove('show'), 2600); }
-function openModal(content) { modalContent.innerHTML = content; modalBackdrop.hidden = false; document.body.style.overflow = 'hidden'; }
+function openModal(content) { closeAccountMenu(); modalContent.innerHTML = content; modalBackdrop.hidden = false; document.body.style.overflow = 'hidden'; }
 function closeModal() {
   modalBackdrop.hidden = true; modalContent.innerHTML = ''; document.body.style.overflow = '';
   if (!state.user || !state.privateDataReady) return;
@@ -625,9 +628,6 @@ function calendarPageMessage(view) {
   if (!currentCalendarPage(view)) return '<div class="empty-state" role="status">正在加载题目…</div>';
   return state.calendarSearchQuery ? `<div class="empty-state">没有符合“${esc(state.calendarSearchQuery)}”的题目。</div>` : '<div class="empty-state">这个区域暂无题目。</div>';
 }
-function calendarZoneNav(route) {
-  return `<nav class="calendar-view-switch" aria-label="题目区域">${[['calendar','review','待审核区'],['leftovers','leftover','leftover 区'],['allocation','allocation','待分配区'],['finished','finished','完成区']].map(([name,area,label]) => `<a href="#${name}" class="${route===name?'active':''}">${label} <span>${state.calendarCounts?.[area] ?? '—'}</span></a>`).join('')}<a href="#pending" class="${route==='pending'?'active':''}">我的未完成</a></nav>`;
-}
 function calendarPuzzleRows(puzzles, area) {
   return puzzles.map((puzzle) => {
     const quality = puzzle.quality || { errors: [], warnings: [] };
@@ -645,7 +645,7 @@ function renderCalendar(route = 'calendar') {
   const puzzles = page?.puzzles || [];
   const title = ({calendar:'待审核区',leftovers:'leftover 区',allocation:'待分配区',pending:'我的未完成谜题'})[route] || '待审核区';
   const rows = calendarPuzzleRows(puzzles, area);
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarZoneNav(route)}${calendarSearchMarkup(route)}<div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarSearchMarkup(route)}<div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
 }
 function renderCalendarLeftovers() { return renderCalendar('leftovers'); }
 function renderFinishedCalendar() {
@@ -663,7 +663,7 @@ function renderFinishedCalendar() {
     return `<div class="month-calendar-day ${puzzle?'has-puzzle':''}" role="gridcell" aria-label="${date}${puzzle?` ${esc(puzzle.title)}`:' 空'}"><time datetime="${date}">${day}</time>${puzzle?`<a href="#calendar-puzzle-${puzzle.number}" data-month-puzzle>${esc(puzzle.title)}</a><small>${puzzle.rule?ruleLabel(puzzle.rule):''}</small>`:'<span class="month-calendar-empty">空</span>'}</div>`;
   })).join('');
   const rows = calendarPuzzleRows(page?.puzzles || [], 'finished');
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">COMPLETED CALENDAR</p><h1>完成区<span class="heading-period">.</span></h1></div></section>${calendarZoneNav('finished')}${calendarSearchMarkup('finished')}<section class="month-calendar-toolbar"><label>年份 <input id="calendarViewYear" type="number" min="1000" max="9999" value="${year}" /></label><label>月份 <select id="calendarMonth">${Array.from({length:12},(_,index)=>`<option value="${index+1}" ${index+1===month?'selected':''}>${index+1} 月</option>`).join('')}</select></label><strong>${year} 年 ${month} 月 · ${page?.total ?? '—'} 道题目</strong></section>${page && !state.calendarSearchQuery ? `<div class="month-calendar-weekdays">${['一','二','三','四','五','六','日'].map((day)=>`<span>周${day}</span>`).join('')}</div><div class="month-calendar-grid" role="grid" aria-label="${year} 年 ${month} 月完成题目">${cells}</div>` : ''}<div class="calendar-list">${rows || calendarPageMessage('finished')}</div>${calendarPaginationMarkup('finished')}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">COMPLETED CALENDAR</p><h1>完成区<span class="heading-period">.</span></h1></div></section>${calendarSearchMarkup('finished')}<section class="month-calendar-toolbar"><label>年份 <input id="calendarViewYear" type="number" min="1000" max="9999" value="${year}" /></label><label>月份 <select id="calendarMonth">${Array.from({length:12},(_,index)=>`<option value="${index+1}" ${index+1===month?'selected':''}>${index+1} 月</option>`).join('')}</select></label><strong>${year} 年 ${month} 月 · ${page?.total ?? '—'} 道题目</strong></section>${page && !state.calendarSearchQuery ? `<div class="month-calendar-weekdays">${['一','二','三','四','五','六','日'].map((day)=>`<span>周${day}</span>`).join('')}</div><div class="month-calendar-grid" role="grid" aria-label="${year} 年 ${month} 月完成题目">${cells}</div>` : ''}<div class="calendar-list">${rows || calendarPageMessage('finished')}</div>${calendarPaginationMarkup('finished')}</div>`;
 }
 function renderCalendarDateInputs(prefix, year = 2028, monthDay = '') {
   const [monthValue = '', dayValue = ''] = String(monthDay || '').split('-');
@@ -1778,26 +1778,31 @@ function renderAuthGate() {
   return `<section class="auth-gate auth-page"><div class="auth-brand"><span class="brand-mark">PA</span><span><strong>PuzArchive</strong><small>private puzzle archive</small></span></div><p class="eyebrow">TRUSTED MEMBERS</p><h1>${registering ? '创建成员账号' : '欢迎回来'}<span class="heading-period">.</span></h1><p>${registering ? '同一个邀请码可重复注册不同账号，不会被消耗。这里仅使用用户名和密码。' : '登录后继续浏览成员共同投稿的谜题日历。'}</p><div class="auth-switch" role="group" aria-label="账号操作"><button type="button" data-auth-mode="login" aria-pressed="${!registering}" ${busy ? 'disabled' : ''}>登录</button><button type="button" data-auth-mode="register" aria-pressed="${registering}" ${busy ? 'disabled' : ''}>注册</button></div><form id="authForm" novalidate>${registering ? `<label class="form-field"><span>邀请码</span><input id="authInviteCode" name="inviteCode" type="password" autocomplete="off" ${busy ? 'disabled' : ''} required /></label>` : ''}<label class="form-field"><span>用户名</span><input id="authUsername" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" ${busy ? 'disabled' : ''} required /></label><label class="form-field"><span>密码</span><input id="authPassword" name="password" type="password" autocomplete="${registering ? 'new-password' : 'current-password'}" ${busy ? 'disabled' : ''} required /></label>${registering ? `<label class="form-field"><span>确认密码</span><input id="authPasswordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''} required /></label>` : ''}<div class="auth-error" id="authError" role="alert" aria-live="polite">${esc(authStatus)}</div><button class="button button-dark auth-submit" type="submit" ${busy ? 'disabled' : ''}>${state.logoutPending ? '正在退出…' : state.authBusy ? '处理中…' : registering ? '使用邀请码注册' : '登录'}</button></form><p class="auth-footnote">同一个邀请码可重复注册不同账号，不会被消耗。</p></section>`;
 }
 function renderRoute() {
+  if (!state.user || state.logoutPending || accountMenuSessionEpoch !== state.sessionEpoch) closeAccountMenu();
   document.body.dataset.authState = !state.sessionChecked ? 'checking' : state.user ? 'authenticated' : 'unauthenticated';
   const route = state.user ? normalizeAuthenticatedRoute() : getRoute();
   setBreadcrumb(route.name);
   const profileName = state.user?.username || state.user?.name || '?';
-  document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号 · 退出</small></span><span class="profile-more">···</span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span><span class="profile-more">···</span>';
+  document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号</small></span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span>';
   const authButton = document.querySelector('#loginButton');
   document.querySelector('#changeUsernameButton').hidden = !state.user;
   document.querySelector('#changeUsernameButton').disabled = state.usernameRenamePending;
-  authButton.classList.toggle('is-logout', Boolean(state.user));
-  authButton.innerHTML = '退出 <span>↗</span>';
+  authButton.hidden = !state.user;
+  authButton.disabled = !state.user || state.logoutPending;
+  accountMenuButton.disabled = !state.user || state.logoutPending;
   authButton.setAttribute('aria-label', '退出登录');
   document.querySelector('#syncStatusText').textContent = state.user ? '私人数据库已连接' : state.serviceError ? '服务不可用' : '等待登录';
+  document.querySelectorAll('[data-calendar-count]').forEach((badge) => { badge.textContent = state.calendarCounts?.[badge.dataset.calendarCount] ?? '—'; });
   const inboxButton = document.querySelector('#inboxButton');
   const inboxBadge = document.querySelector('#inboxUnreadBadge');
   if (inboxButton && inboxBadge) {
+    inboxButton.disabled = !state.user || state.logoutPending;
     inboxBadge.hidden = state.inboxUnreadCount <= 0;
     inboxBadge.textContent = state.inboxUnreadCount > 99 ? '99+' : String(state.inboxUnreadCount);
     inboxButton.setAttribute('aria-label', `收件箱，${state.inboxUnreadCount} 条未读`);
     inboxButton.title = state.inboxUnreadCount ? `收件箱：${state.inboxUnreadCount} 条未读` : '收件箱';
   }
+  if (!accountMenu.hidden) positionAccountMenu();
   if (!state.sessionChecked || !state.user) { app.innerHTML = renderAuthGate(); document.querySelector('#retrySessionButton')?.addEventListener('click', bootstrapDatabase); bindAuthGate(); return; }
   if (state.serviceError) { app.innerHTML = `<div class="page-wrap-inner"><div class="error-state" role="alert"><strong>私人数据暂时无法加载</strong><p>${esc(state.serviceError)}</p><button class="button button-light" type="button" id="retryPrivateButton">重试</button></div></div>`; document.querySelector('#retryPrivateButton')?.addEventListener('click', loadPrivateData); return; }
   const enteredMessages = state.privateDataReady && route.name === 'messages' && state.lastPrivateRouteName !== 'messages';
@@ -1901,6 +1906,36 @@ async function submitAuthForm(event) {
     }
   }
 }
+function closeAccountMenu({ restoreFocus = false } = {}) {
+  const wasOpen = !accountMenu.hidden;
+  accountMenu.hidden = true;
+  accountMenuButton.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && wasOpen && state.user && !accountMenuButton.disabled) accountMenuButton.focus({ preventScroll: true });
+}
+function positionAccountMenu() {
+  if (accountMenu.hidden) return;
+  const anchor = accountMenuButton.getBoundingClientRect();
+  const edge = 8, gap = 8;
+  const width = accountMenu.offsetWidth, height = accountMenu.offsetHeight;
+  const viewportWidth = document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight;
+  const above = anchor.top - height - gap;
+  const top = above >= edge ? above : anchor.bottom + gap;
+  accountMenu.style.left = `${Math.max(edge, Math.min(anchor.right - width, viewportWidth - width - edge))}px`;
+  accountMenu.style.top = `${Math.max(edge, Math.min(top, viewportHeight - height - edge))}px`;
+}
+function accountMenuItems() {
+  return [...accountMenu.querySelectorAll('[role="menuitem"]')].filter((item) => !item.hidden && !item.disabled);
+}
+function openAccountMenu({ last = false } = {}) {
+  if (!state.user || state.logoutPending || !modalBackdrop.hidden) return;
+  accountMenuSessionEpoch = state.sessionEpoch;
+  accountMenu.hidden = false;
+  accountMenuButton.setAttribute('aria-expanded', 'true');
+  positionAccountMenu();
+  const items = accountMenuItems();
+  (last ? items.at(-1) : items[0])?.focus({ preventScroll: true });
+}
 async function logout() {
   if (!state.user || state.logoutPending) return;
   state.logoutPending = true;
@@ -1919,10 +1954,40 @@ async function logout() {
   }
 }
 document.querySelector('#loginButton').addEventListener('click', logout);
-document.querySelector('#profileButton').addEventListener('click', logout);
-document.querySelector('#changeUsernameButton').addEventListener('click', openUsernameEditor);
-document.querySelector('#inboxButton')?.addEventListener('click', () => { if (state.user && getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
+document.querySelector('#changeUsernameButton').addEventListener('click', () => {
+  closeAccountMenu({ restoreFocus: true });
+  openUsernameEditor();
+  document.querySelector('#newUsername')?.focus({ preventScroll: true });
+});
+accountMenuButton.addEventListener('click', () => { if (accountMenu.hidden) openAccountMenu(); else closeAccountMenu({ restoreFocus: true }); });
+accountMenuButton.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  event.preventDefault();
+  openAccountMenu({ last: event.key === 'ArrowUp' });
+});
+accountMenu.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab') { closeAccountMenu({ restoreFocus: true }); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const items = accountMenuItems();
+  const current = items.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+  items[next]?.focus({ preventScroll: true });
+});
+document.addEventListener('pointerdown', (event) => {
+  if (!accountMenu.contains(event.target) && !accountMenuButton.contains(event.target)) closeAccountMenu();
+});
+document.addEventListener('focusin', (event) => {
+  if (!accountMenu.contains(event.target) && !accountMenuButton.contains(event.target)) closeAccountMenu();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !accountMenu.hidden) { event.preventDefault(); closeAccountMenu({ restoreFocus: true }); }
+});
+window.addEventListener('resize', positionAccountMenu);
+window.addEventListener('scroll', positionAccountMenu, { passive: true });
+document.querySelector('.sidebar').addEventListener('scroll', positionAccountMenu, { passive: true });
+document.querySelector('#inboxButton')?.addEventListener('click', () => { closeAccountMenu(); if (!state.user) return; if (getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
-window.addEventListener('hashchange', renderRoute);
+window.addEventListener('hashchange', () => { closeAccountMenu(); renderRoute(); });
 renderRoute();
 bootstrapDatabase();
