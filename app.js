@@ -9,6 +9,8 @@ const state = {
   calendarPuzzles: [],
   calendarLeftovers: [],
   rules: [],
+  rulesStatus: 'idle',
+  rulesError: '',
   folders: [],
   visible: 6,
   sort: 'recent',
@@ -53,6 +55,7 @@ let toastTimer;
 const API_REQUEST_TIMEOUT_MS = 20000;
 let privateLoadAttempt = 0;
 let privateLoadController = null;
+let rulesLoadPromise = null;
 
 async function apiRequest(path, options = {}) {
   const authEndpoint = ['/api/session', '/api/register'].includes(path);
@@ -115,12 +118,11 @@ async function loadPrivateData() {
   state.serviceError = '';
   renderRoute();
   try {
-    const [ruleData, calendarData, leftoverData, inboxData, guidelinesData] = await Promise.all([
-      '/api/rules', '/api/calendar/puzzles', '/api/calendar/leftovers', '/api/inbox?limit=20', '/api/penpa-guidelines'
+    const [calendarData, leftoverData, inboxData, guidelinesData] = await Promise.all([
+      '/api/calendar/puzzles', '/api/calendar/leftovers', '/api/inbox?limit=20', '/api/penpa-guidelines'
     ].map((path) => apiRequest(path, { signal: controller.signal })));
     if (!isCurrentAttempt()) return;
     state.penpaGuidelines = guidelinesData;
-    state.rules = ruleData.rules || [];
     state.calendarPuzzles = (calendarData.puzzles || []).map(normalizePuzzle);
     state.calendarLeftovers = (leftoverData.puzzles || []).map(normalizePuzzle);
     state.inboxItems = inboxData.notifications || [];
@@ -141,7 +143,51 @@ async function loadPrivateData() {
 }
 function normalizePuzzle(puzzle) { return { ...puzzle, ratings: (puzzle.ratings || [0, 0, 0]).map(Number), userRating: puzzle.userRating || null, votes: Number(puzzle.votes || 0), tags: puzzle.tags || [] }; }
 function isCurrentUserSession(epoch, userId) { return epoch === state.sessionEpoch && Boolean(state.user) && String(state.user.id) === String(userId); }
-function clearPrivateState() { privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function loadRules() {
+  if (!state.user) return Promise.resolve(false);
+  if (state.rulesStatus === 'loaded') return Promise.resolve(true);
+  if (rulesLoadPromise) return rulesLoadPromise;
+  const epoch = state.sessionEpoch; const userId = state.user.id;
+  state.rulesStatus = 'loading'; state.rulesError = '';
+  let request;
+  request = (async () => {
+    await Promise.resolve();
+    try {
+      const data = await apiRequest('/api/rules');
+      if (!isCurrentUserSession(epoch, userId)) return false;
+      state.rules = data.rules || [];
+      state.rulesStatus = 'loaded'; state.rulesError = '';
+      if (getRoute().name === 'rules') renderRoute();
+      return true;
+    } catch (error) {
+      if (!isCurrentUserSession(epoch, userId)) return false;
+      state.rulesStatus = 'error'; state.rulesError = error.message || '规则目录加载失败。';
+      if (getRoute().name === 'rules') renderRoute();
+      return false;
+    } finally {
+      if (rulesLoadPromise === request) rulesLoadPromise = null;
+    }
+  })();
+  rulesLoadPromise = request;
+  if (getRoute().name === 'rules' && modalBackdrop.hidden) renderRoute();
+  return request;
+}
+function invalidateRules() { state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; }
+function requireRulesForModal(title, openWhenReady) {
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  openModal(`<p class="modal-eyebrow">RULE CATALOG</p><h2 id="modalTitle">${esc(title)}</h2><p class="modal-intro" role="status" id="requiredRulesStatus">正在加载规则目录…</p><div class="modal-error" id="requiredRulesError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button><button class="button button-dark" id="retryRequiredRulesButton" type="button" hidden>重试加载</button></div>`);
+  const status = document.querySelector('#requiredRulesStatus'); const error = document.querySelector('#requiredRulesError'); const retry = document.querySelector('#retryRequiredRulesButton');
+  const attempt = async () => {
+    status.textContent = '正在加载规则目录…'; error.textContent = ''; retry.hidden = true;
+    const loaded = await loadRules();
+    if (!isCurrentUserSession(epoch, userId) || !status.isConnected) return;
+    if (loaded) { openWhenReady(); return; }
+    status.textContent = '无法继续，规则目录尚未加载。'; error.textContent = state.rulesError || '规则目录加载失败。'; retry.hidden = false;
+  };
+  retry.addEventListener('click', attempt);
+  void attempt();
+}
+function clearPrivateState() { privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
@@ -423,6 +469,7 @@ function notificationEntityMarkup(notification) {
     return exists ? `<a class="inbox-entity-link" href="#calendar-puzzle-${id}">查看谜题 →</a>` : '<span class="inbox-entity-missing">关联谜题已删除或暂不可用</span>';
   }
   if (['rule', 'rules'].includes(type)) {
+    if (state.rulesStatus !== 'loaded') return '<a class="inbox-entity-link" href="#rules">查看规则目录 →</a>';
     const exists = state.rules.some((rule) => Number(rule.id) === id);
     return exists ? '<a class="inbox-entity-link" href="#rules">查看规则目录 →</a>' : '<span class="inbox-entity-missing">关联规则已删除或暂不可用</span>';
   }
@@ -456,11 +503,12 @@ async function loadInboxFresh() {
   if (!state.user || state.inboxLoading) return;
   const epoch = state.sessionEpoch; const userId = state.user.id;
   state.inboxLoading = true; state.inboxError = ''; state.inboxActionError = ''; renderRoute();
+  const refreshLoadedRules = state.rulesStatus === 'loaded';
   const [inboxResult, calendarResult, leftoverResult, rulesResult] = await Promise.allSettled([
     apiRequest('/api/inbox?limit=20'),
     apiRequest('/api/calendar/puzzles'),
     apiRequest('/api/calendar/leftovers'),
-    apiRequest('/api/rules')
+    ...(refreshLoadedRules ? [apiRequest('/api/rules')] : [])
   ]);
   if (!isCurrentUserSession(epoch, userId)) return;
   if (inboxResult.status === 'fulfilled') {
@@ -471,7 +519,7 @@ async function loadInboxFresh() {
   } else state.inboxError = inboxResult.reason?.message || '无法刷新通知。';
   if (calendarResult.status === 'fulfilled') state.calendarPuzzles = (calendarResult.value.puzzles || []).map(normalizePuzzle);
   if (leftoverResult.status === 'fulfilled') state.calendarLeftovers = (leftoverResult.value.puzzles || []).map(normalizePuzzle);
-  if (rulesResult.status === 'fulfilled') state.rules = rulesResult.value.rules || [];
+  if (refreshLoadedRules && rulesResult?.status === 'fulfilled') state.rules = rulesResult.value.rules || [];
   state.inboxLoading = false;
   renderRoute();
 }
@@ -517,6 +565,8 @@ function bindMessages() {
   document.querySelector('#loadMoreInboxButton')?.addEventListener('click', loadMoreInbox);
 }
 function renderRules() {
+  if (state.rulesStatus === 'loading' || state.rulesStatus === 'idle') return '<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则目录<span class="heading-period">.</span></h1></div></section><div class="empty-state" role="status">正在加载规则目录…</div></div>';
+  if (state.rulesStatus === 'error') return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则目录<span class="heading-period">.</span></h1></div></section><div class="error-state" role="alert"><strong>规则目录暂时无法加载</strong><p>${esc(state.rulesError)}</p><button class="button button-light" type="button" id="retryRulesButton">重试</button></div></div>`;
   const rules = state.rules;
   const filtered = rules.filter((rule) => ruleMatchesRuleFilter(rule, state.ruleFilter) && (!state.ruleQuery || `${rule.titleZh || ''} ${rule.titleEn || ''} ${rule.category || ''} ${(rule.rulesZh || []).join(' ')} ${(rule.rulesEn || []).join(' ')}`.toLowerCase().includes(state.ruleQuery.toLowerCase())));
   const totals = rules.reduce((sum, rule) => { const quality = rule.quality || {}; sum.errors += (quality.errors || []).filter((entry)=>!entry.ignored).length; sum.warnings += (quality.warnings || []).length; return sum; }, { errors: 0, warnings: 0 });
@@ -775,6 +825,7 @@ function readCalendarLinks(prefix, inputMode = 'external') {
   return normalizeCalendarLinks({inputMode,penpaEditUrl:document.getElementById(`${prefix}PenpaEdit`).value,penpaSolveUrl:document.getElementById(`${prefix}PenpaSolve`).value,puzzlinkUrl:document.getElementById(`${prefix}Puzzlink`).value});
 }
 function openAddPuzzle(scope = 'library', draft = {}) {
+  if (state.rulesStatus !== 'loaded') { requireRulesForModal('准备投稿', () => openAddPuzzle(scope, draft)); return; }
   const isCalendar = scope === 'calendar';
   const initialRule = state.rules.find((rule) => String(draft.ruleId || '') === String(rule.id));
   const initialRuleId = initialRule ? String(initialRule.id) : '';
@@ -809,6 +860,7 @@ function openAddPuzzle(scope = 'library', draft = {}) {
 }
 function captureSubmissionDraft() { const draft = { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '' }; if (document.querySelector('#newPuzzlePenpaEdit')) { for (const [key,id] of [['penpaEditUrl','PenpaEdit'],['penpaSolveUrl','PenpaSolve'],['puzzlinkUrl','Puzzlink']]) draft[key] = document.getElementById(`newPuzzle${id}`).value; } if (document.querySelector('#newPuzzleDateYear')) Object.assign(draft, readCalendarDateFields('newPuzzleDate')); return draft; }
 function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = {}) {
+  if (state.rulesStatus !== 'loaded') { requireRulesForModal('打开规则编辑器', () => openRuleEditor({ fromSubmission, draft, rule })); return; }
   const editing = Boolean(rule);
   const rejectedItems = editing ? ['name', 'description', 'example'].filter((item) => rule.quality?.groups?.[item]?.rejected || rule.quality?.groups?.[item]?.status === 'rejected') : [];
   const rejectedHint = rejectedItems.length ? `<p class="audit-edit-warning" role="note">${rejectedItems.map((item) => auditLabels[item]).join('、')}已被打回。只有实际修改该项内容后才会重新开始审核；重新保存相同内容不会清除打回状态。</p>` : '';
@@ -851,7 +903,7 @@ function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = 
     }
   });
 }
-async function refreshRules(epoch = state.sessionEpoch, userId = state.user?.id) { const data = await apiRequest('/api/rules'); if (!isCurrentUserSession(epoch, userId)) return false; state.rules = data.rules || []; return true; }
+async function refreshRules(epoch = state.sessionEpoch, userId = state.user?.id) { const data = await apiRequest('/api/rules'); if (!isCurrentUserSession(epoch, userId)) return false; state.rules = data.rules || []; state.rulesStatus = 'loaded'; state.rulesError = ''; return true; }
 function bindRuleCatalog(root = document) {
   bindQualityIgnores(root);
   root.querySelectorAll('[data-rule-edit]').forEach((button) => button.addEventListener('click', () => {
@@ -1047,7 +1099,7 @@ function openUsernameEditor() {
     try {
       const data=await apiRequest('/api/account/username',{method:'PATCH',body:JSON.stringify({username:normalized.username,expectedUsername})});
       if (!isCurrentUserSession(epoch,userId)) return;
-      state.sessionEpoch+=1;state.user=data.user;
+      state.sessionEpoch+=1;state.user=data.user;invalidateRules();
       if (errorNode.isConnected) closeModal();
       await loadPrivateData();
       showToast('用户名已修改，之后请使用新用户名登录。');
@@ -1227,7 +1279,7 @@ function renderRoute() {
   if (['calendar', 'pending', 'allocation', 'finished'].includes(route.name)) bindCalendar(route.name);
   if (route.name === 'leftovers') bindLeftovers();
   if (route.name === 'messages') bindMessages();
-  if (route.name === 'rules') { document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor()); bindRuleCatalog(); }
+  if (route.name === 'rules') { document.querySelector('#addRuleButton')?.addEventListener('click', () => openRuleEditor()); document.querySelector('#retryRulesButton')?.addEventListener('click', () => { void loadRules(); }); bindRuleCatalog(); if (state.rulesStatus === 'idle' || state.rulesStatus === 'loading') void loadRules(); }
   if (route.name === 'calendar-puzzle') bindPuzzle(route.number, 'calendar');
   bindDifficultySpoilers();
   if (enteredMessages) void loadInboxFresh();
