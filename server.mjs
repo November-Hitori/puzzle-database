@@ -260,12 +260,14 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   if (request.method==='GET' && pathname==='/api/calendar/policy') return sendJson(response,200,{tags:CALENDAR_REVIEW_TAGS,votes:CALENDAR_REVIEW_VOTES,minimumScoreCount:CALENDAR_MINIMUM_SCORE_COUNT,approvalAverageGreaterThan:0});
   if (request.method==='GET' && pathname==='/api/inbox') {
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
-    const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before');
+    const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before'),rawOffset=url.searchParams.get('offset');
     const limit=rawLimit===null?30:Number(rawLimit),before=rawBefore===null?null:Number(rawBefore);
-    if (!Number.isInteger(limit)||limit<1||limit>50||(before!==null&&(!Number.isSafeInteger(before)||before<1))) return sendJson(response,400,{error:'invalid inbox cursor'});
+    const offset=rawOffset===null?null:/^\d+$/.test(rawOffset)?Number(rawOffset):NaN;
+    if (!Number.isInteger(limit)||limit<1||limit>50||(before!==null&&(!Number.isSafeInteger(before)||before<1))
+      ||(offset!==null&&(!Number.isSafeInteger(offset)||offset<0||before!==null))) return sendJson(response,400,{error:'invalid inbox cursor or page offset'});
     const read=url.searchParams.get('read')??'all',tag=url.searchParams.get('tag')??'all';
     if (!INBOX_READ_FILTERS.includes(read)||!INBOX_TAG_FILTERS.includes(tag)) return sendJson(response,400,{error:'invalid inbox filter'});
-    return sendJson(response,200,getInbox(user.id,{limit,before,read,tag}));
+    return sendJson(response,200,getInbox(user.id,{limit,before,read,tag,offset}));
   }
   if (request.method==='POST'&&pathname==='/api/inbox/read-all') {
     markAllInboxNotificationsRead(user.id);
@@ -349,12 +351,12 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     const params=new URL(request.url,`http://${request.headers.host||'localhost'}`).searchParams;
     const integer=(key,fallback)=>params.has(key)&&/^\d+$/.test(params.get(key))?Number(params.get(key)):params.has(key)?NaN:fallback;
     const limit=integer('limit',10),offset=integer('offset',0),year=integer('year',2028),month=integer('month',1);
-    const view=params.get('view')??'calendar',sort=params.get('sort')??'date';
+    const view=params.get('view')??'calendar',sort=params.get('sort')??'date',q=(params.get('q')??'').trim();
     if(!Number.isSafeInteger(limit)||limit<1||limit>50||!Number.isSafeInteger(offset)||offset<0
       ||!Number.isSafeInteger(year)||year<1000||year>9999||!Number.isSafeInteger(month)||month<1||month>12
-      ||!['calendar','pending','leftovers','allocation','finished'].includes(view)||!['date','newest'].includes(sort))
+      ||!['calendar','pending','leftovers','allocation','finished'].includes(view)||!['date','newest'].includes(sort)||!validText(q,200))
       return sendJson(response,400,{error:'invalid calendar pagination or filter'});
-    return sendJson(response,200,getCalendarPage(user.id,{limit,offset,view,sort,year,month}));
+    return sendJson(response,200,getCalendarPage(user.id,{limit,offset,view,sort,year,month,q}));
   }
   if (request.method==='GET' && pathname==='/api/calendar/puzzles') return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
   if (request.method==='GET' && pathname==='/api/calendar/leftovers') return sendJson(response,200,{puzzles:getCalendarLeftovers(user.id)});

@@ -162,6 +162,16 @@ test('inbox icon tags and read filters are persistent, recipient scoped and pagi
         before=page.nextBefore;
       } while (before!==null);
       assert.deepEqual(seen,expected.map(item=>item.id));
+      for (const offset of [0,2,Math.max(0,expected.length-2),expected.length,1000]) {
+        const result=await request(`/api/inbox?limit=2&read=${read}&tag=${tag}&offset=${offset}`);
+        assert.equal(result.status,200);
+        const page=result.body;
+        assert.deepEqual(page.notifications.map(item=>item.id),expected.slice(offset,offset+2).map(item=>item.id),`read=${read}, tag=${tag}, offset=${offset}`);
+        assert.equal(page.total,expected.length);
+        assert.equal(page.unreadCount,unreadCount);
+        assert.equal(page.nextOffset,offset+page.notifications.length<expected.length?offset+page.notifications.length:null);
+        assert.equal(page.nextBefore,page.nextOffset===null?null:page.notifications.at(-1).id);
+      }
       const exhausted=(await request(`/api/inbox?read=${read}&tag=${tag}&before=${fixtures.at(-1).id}`)).body;
       assert.deepEqual(exhausted,{notifications:[],unreadCount,nextBefore:null});
     }
@@ -188,7 +198,8 @@ test('inbox icon tags and read filters are persistent, recipient scoped and pagi
     for (const query of [
       'read=invalid','read=','read=true','tag=invalid','tag=','tag=star',
       'limit=0','limit=51','limit=1.5','limit=NaN',
-      'before=0','before=-1','before=1.5','before=9007199254740992','before=NaN'
+      'before=0','before=-1','before=1.5','before=9007199254740992','before=NaN',
+      'offset=-1','offset=','offset=1.5','offset=1e2','offset=NaN','offset=9007199254740992','offset=0&before=1'
     ]) assert.equal((await request(`/api/inbox?${query}`)).status,400,query);
   });
 });

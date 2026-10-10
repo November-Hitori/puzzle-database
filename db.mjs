@@ -719,17 +719,21 @@ function insertUserNotification(recipientUserId,kind,title,body,entityType,entit
     .run(recipientUserId,kind,title,body,entityType,entityId,dedupeKey).changes>0;
 }
 
-export function getInbox(userId,{limit=30,before=null,read='all',tag='all'}={}) {
+export function getInbox(userId,{limit=30,before=null,read='all',tag='all',offset=null}={}) {
   const unreadCount=Number(database.prepare('SELECT COUNT(*) AS count FROM user_notifications WHERE recipient_user_id=? AND read_at IS NULL').get(userId).count);
   const conditions=['n.recipient_user_id=?'],parameters=[userId];
   if (before!==null) { conditions.push('n.id<?');parameters.push(before); }
   if (read==='read') conditions.push('n.read_at IS NOT NULL');
   if (read==='unread') conditions.push('n.read_at IS NULL');
-  if (tag==='tagged') conditions.push('EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id)');
-  if (tag==='untagged') conditions.push('NOT EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id)');
+  // A bounded correlated probe avoids SQLite's EXISTS rewrite miscounting
+  // offsets when one notification has several tags.
+  if (tag==='tagged') conditions.push('EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id LIMIT 1)');
+  if (tag==='untagged') conditions.push('NOT EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id LIMIT 1)');
+  const total=offset===null?null:Number(database.prepare(`SELECT COUNT(*) AS count FROM user_notifications n WHERE ${conditions.join(' AND ')}`).get(...parameters).count);
   const rows=database.prepare(`SELECT n.id,n.kind,n.title,n.body,n.entity_type,n.entity_id,n.created_at,n.read_at
-    FROM user_notifications n WHERE ${conditions.join(' AND ')} ORDER BY n.id DESC LIMIT ?`).all(...parameters,limit+1);
-  const hasMore=rows.length>limit,selected=hasMore?rows.slice(0,limit):rows;
+    FROM user_notifications n WHERE ${conditions.join(' AND ')} ORDER BY n.id DESC LIMIT ?${offset===null?'':' OFFSET ?'}`).all(...parameters,offset===null?limit+1:limit,...(offset===null?[]:[offset]));
+  const hasMore=offset===null?rows.length>limit:offset+rows.length<total;
+  const selected=rows.length>limit?rows.slice(0,limit):rows;
   const tagsById=new Map(selected.map((row)=>[row.id,new Set()]));
   if (selected.length) {
     const tags=database.prepare(`SELECT notification_id,tag FROM user_notification_tags
@@ -740,7 +744,7 @@ export function getInbox(userId,{limit=30,before=null,read='all',tag='all'}={}) 
     tags:INBOX_TAG_IDS.filter((tag)=>tagsById.get(row.id).has(tag)),
     entity:row.entity_type&&row.entity_id!==null?{type:row.entity_type,id:row.entity_id}:null}));
   const nextBefore=hasMore?selected.at(-1).id:null;
-  return {notifications,unreadCount,nextBefore};
+  return {notifications,unreadCount,nextBefore,...(offset===null?{}:{total,nextOffset:hasMore?offset+selected.length:null})};
 }
 
 export function setInboxNotificationTags(userId,id,tags) {
@@ -1007,22 +1011,23 @@ function groupCalendarQualityRows(rows,idKey) {
   }
   return groups;
 }
-function getCalendarPageQuality(guidelines) {
+database.function('calendar_search_lower',{deterministic:true},(value)=>String(value??'').toLowerCase());
+function getCalendarPageQuality(guidelines,searchSql='',searchParams=[]) {
   // Classifying the archive needs only current quality state. Histories, solving
   // participants and detailed puzzle payloads are loaded for the requested page.
   const rules=database.prepare(`${ruleSelectSql} WHERE EXISTS (
-    SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id
-  )`).all().map(ruleFromRow);
+    SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id${searchSql}
+  )`).all(...searchParams).map(ruleFromRow);
   const ruleData={
     errorIgnores:groupCalendarQualityRows(database.prepare(`SELECT i.entity_id AS ruleId,i.error_key AS key,i.revision
       FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
       WHERE i.entity_type='rule' AND EXISTS (SELECT 1 FROM puzzles p
-        WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=i.entity_id)`).all(),'ruleId'),
+        WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=i.entity_id${searchSql})`).all(...searchParams),'ruleId'),
     currentReviews:groupRuleQualityRows(database.prepare(`SELECT v.rule_id AS ruleId,v.item,v.decision,
         (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
       FROM rule_item_votes v JOIN trusted_users u ON u.id=v.user_id JOIN rules r ON r.id=v.rule_id
       WHERE v.revision=CASE v.item WHEN 'name' THEN r.name_revision WHEN 'description' THEN r.description_revision WHEN 'example' THEN r.example_revision END
-        AND EXISTS (SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id)`).all()),
+        AND EXISTS (SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id${searchSql})`).all(...searchParams)),
     history:new Map(),revisions:new Map()
   };
   return {
@@ -1030,23 +1035,28 @@ function getCalendarPageQuality(guidelines) {
     errorIgnores:groupCalendarQualityRows(database.prepare(`SELECT i.entity_id AS puzzleId,i.error_key AS key,i.revision
       FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
       JOIN puzzles p ON p.id=i.entity_id
-      WHERE i.entity_type='puzzle' AND p.scope='calendar' AND p.calendar_status='approved'`).all(),'puzzleId'),
+      WHERE i.entity_type='puzzle' AND p.scope='calendar' AND p.calendar_status='approved'${searchSql}`).all(...searchParams),'puzzleId'),
     currentReviews:groupCalendarQualityRows(database.prepare(`SELECT v.puzzle_id AS puzzleId,v.decision,
         (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
       FROM calendar_penpa_votes v JOIN trusted_users u ON u.id=v.user_id JOIN puzzles p ON p.id=v.puzzle_id
-      WHERE p.scope='calendar' AND p.calendar_status='approved' AND v.revision=p.penpa_revision AND v.guidelines_revision=?`).all(guidelines.revision),'puzzleId')
+      WHERE p.scope='calendar' AND p.calendar_status='approved' AND v.revision=p.penpa_revision AND v.guidelines_revision=?${searchSql}`).all(guidelines.revision,...searchParams),'puzzleId')
   };
 }
-export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='date',year=2028,month=1}={}) {
+export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='date',year=2028,month=1,q=''}={}) {
   const guidelines=getPenpaGuidelines();
+  const query=q.trim();
+  const numericQuery=/^#?\d+$/.test(query);
+  const puzzleNumber=numericQuery?Number(query.replace(/^#/,'')):null;
+  const searchSql=!query?'':numericQuery?' AND p.number=?':' AND instr(calendar_search_lower(p.title),?)>0';
+  const searchParams=!query?[]:[numericQuery?(Number.isSafeInteger(puzzleNumber)?puzzleNumber:-1):query.toLowerCase()];
   const rows=database.prepare(`SELECT p.id,p.number,p.title,p.rule_id,p.calendar_status,p.calendar_year,
       p.suggested_date,p.assigned_date,(p.penpa_edit_url<>'') AS penpa_edit_url,
       (p.penpa_solve_url<>'') AS penpa_solve_url,p.penpa_revision,
       r.title_zh AS rule_title_zh,r.title_en AS rule_title_en,
       EXISTS (SELECT 1 FROM puzzle_completions c WHERE c.puzzle_id=p.id AND c.user_id=?) AS completed
     FROM puzzles p LEFT JOIN rules r ON r.id=p.rule_id
-    WHERE p.scope='calendar' AND p.calendar_status IN ('pending','approved','leftover')`).all(userId);
-  const qualityData=rows.some((row)=>row.calendar_status==='approved')?getCalendarPageQuality(guidelines):null;
+    WHERE p.scope='calendar' AND p.calendar_status IN ('pending','approved','leftover')${searchSql}`).all(userId,...searchParams);
+  const qualityData=rows.some((row)=>row.calendar_status==='approved')?getCalendarPageQuality(guidelines,searchSql,searchParams):null;
   const counts={review:0,leftover:0,allocation:0,finished:0};
   for(const row of rows) {
     if(row.calendar_status==='approved') {
@@ -1067,7 +1077,7 @@ export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='
     puzzles:pageRows.map(({number})=>puzzleByNumber(number,userId,'calendar',context)),
     nextOffset:offset+pageRows.length<selected.length?offset+pageRows.length:null,
     total:selected.length,counts,
-    ...(view==='finished'?{monthEntries:selected.map((row)=>({number:row.number,title:row.title,assignedDate:row.assigned_date,
+    ...(view==='finished'?{monthEntries:(query?pageRows:selected).map((row)=>({number:row.number,title:row.title,assignedDate:row.assigned_date,
       ...(row.rule_title_zh!==null?{rule:{titleZh:row.rule_title_zh,titleEn:row.rule_title_en}}:{})}))}:{})
   };
 }

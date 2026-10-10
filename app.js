@@ -31,6 +31,12 @@ const state = {
   privateLoading: false,
   sessionEpoch: 0,
   calendarSort: 'date',
+  calendarSearchQuery: '',
+  calendarSearchDraft: '',
+  calendarSearchError: '',
+  calendarJumpDraft: '1',
+  calendarJumpError: '',
+  calendarInputFocus: null,
   privateDataReady: false,
   calendarPageOffset: 0,
   calendarPageQueryKey: '',
@@ -48,6 +54,9 @@ const state = {
   inboxNextBefore: null,
   inboxPages: [],
   inboxPageIndex: 0,
+  inboxTotal: 0,
+  inboxPageJumpValue: '1',
+  inboxPageJumpError: '',
   inboxLoading: false,
   inboxError: '',
   inboxActionError: '',
@@ -434,7 +443,7 @@ async function submitPenpaAudit(puzzle,decision,suggestion='',errorNode=null) {
 
 function calendarAreaOf(puzzle) { return puzzle.calendarArea || (puzzle.calendarStatus === 'leftover' ? 'leftover' : puzzle.calendarStatus === 'approved' ? 'allocation' : 'review'); }
 function calendarPageQuery(view = getRoute().name) {
-  const query = { view, sort: state.calendarSort, limit: String(CALENDAR_PAGE_SIZE) };
+  const query = { view, sort: state.calendarSort, limit: String(CALENDAR_PAGE_SIZE), q: state.calendarSearchQuery };
   if (view === 'finished') { query.year = String(state.calendarViewYear); query.month = String(state.calendarMonth); }
   return query;
 }
@@ -461,6 +470,12 @@ function resetCalendarPagination() {
   state.calendarPageOffset = 0;
   state.calendarPageQueryKey = '';
   state.calendarCounts = null;
+  state.calendarSearchQuery = '';
+  state.calendarSearchDraft = '';
+  state.calendarSearchError = '';
+  state.calendarJumpDraft = '1';
+  state.calendarJumpError = '';
+  state.calendarInputFocus = null;
 }
 function selectCalendarQuery(view) {
   const key = calendarQueryKey(view);
@@ -468,6 +483,8 @@ function selectCalendarQuery(view) {
     cancelCalendarPageRequests();
     state.calendarPageQueryKey = key;
     state.calendarPageOffset = 0;
+    state.calendarJumpDraft = '1';
+    state.calendarJumpError = '';
     state.calendarPageError = '';
   }
 }
@@ -503,6 +520,7 @@ function requestCalendarPage(view, offset) {
   return request.promise;
 }
 function prefetchCalendarPage(view, page) {
+  if (state.calendarSearchQuery) return;
   if (getRoute().name !== view || state.calendarPageQueryKey !== calendarQueryKey(view)) return;
   const offset = page?.nextOffset;
   if (!Number.isInteger(offset) || offset <= state.calendarPageOffset) return;
@@ -531,6 +549,7 @@ async function loadCalendarPage(view = getRoute().name) {
     mergeCalendarPuzzles(page.puzzles);
     if (!page.puzzles.length && offset > 0 && Number(page.total) <= offset) {
       state.calendarPageOffset = Math.max(0, Math.floor((Math.max(1, Number(page.total)) - 1) / CALENDAR_PAGE_SIZE) * CALENDAR_PAGE_SIZE);
+      state.calendarJumpDraft = String(Math.floor(state.calendarPageOffset / CALENDAR_PAGE_SIZE) + 1);
       return loadCalendarPage(view);
     }
     if (mayRender()) renderRoute();
@@ -580,18 +599,30 @@ function loadCalendarPuzzleDetail(number, { force = false } = {}) {
   return detail.promise;
 }
 function currentCalendarPage(view) { return state.calendarPageCache.get(calendarCacheKey(view)); }
+function captureCalendarInputFocus() {
+  const input = document.activeElement;
+  state.calendarInputFocus = ['calendarSearchInput', 'calendarPageInput'].includes(input?.id)
+    ? { id: input.id, start: input.selectionStart, end: input.selectionEnd } : null;
+}
+function calendarSearchMarkup(view) {
+  const area = ({ calendar: '待审核区', pending: '我的未完成谜题', leftovers: 'leftover 区', allocation: '待分配区', finished: '完成区' })[view];
+  const scope = view === 'finished' ? `${state.calendarViewYear} 年 ${state.calendarMonth} 月的完成区` : area;
+  return `<section class="calendar-search"><form id="calendarSearchForm" novalidate><label class="calendar-search-field" for="calendarSearchInput"><span>搜索题目</span><input id="calendarSearchInput" type="search" maxlength="200" value="${esc(state.calendarSearchDraft)}" placeholder="题号或题目名称" autocomplete="off" aria-describedby="calendarSearchScope calendarSearchError" /></label><div class="calendar-search-actions"><button class="button button-dark" id="calendarSearchButton" type="submit">搜索</button><button class="button button-light" id="clearCalendarSearchButton" type="button">清空</button></div></form><p class="calendar-search-scope" id="calendarSearchScope">搜索${esc(scope)}，每页显示 10 道题目。${state.calendarSearchQuery ? '区域数字为搜索命中数量。' : '输入完整题号（可带 #）或题目名称。'}</p><p class="calendar-search-error" id="calendarSearchError" role="alert">${esc(state.calendarSearchError)}</p></section>`;
+}
 function calendarPaginationMarkup(view) {
   const page = currentCalendarPage(view);
   const total = Number(page?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / CALENDAR_PAGE_SIZE));
+  const current = Math.floor(state.calendarPageOffset / CALENDAR_PAGE_SIZE) + 1;
   const start = page?.puzzles.length ? state.calendarPageOffset + 1 : 0;
   const end = page?.puzzles.length ? state.calendarPageOffset + page.puzzles.length : 0;
   const loading = state.calendarPageLoading;
-  return `<div class="list-pagination" aria-label="题目分页"><button class="button button-light" type="button" id="previousCalendarPageButton" ${state.calendarPageOffset === 0 || loading ? 'disabled' : ''}>上一页</button><span id="calendarPageStatus" role="status" aria-live="polite">${loading ? '正在加载题目…' : page ? `第 ${Math.floor(state.calendarPageOffset / CALENDAR_PAGE_SIZE) + 1} 页 · 显示 ${start}–${end} / ${total} 道题目` : '每页 10 道题目'}</span><button class="button button-light" type="button" id="nextCalendarPageButton" ${!Number.isInteger(page?.nextOffset) || loading ? 'disabled' : ''}>下一页</button></div>`;
+  return `<div class="list-pagination" aria-label="题目分页"><button class="button button-light" type="button" id="previousCalendarPageButton" ${state.calendarPageOffset === 0 || loading ? 'disabled' : ''}>上一页</button><span id="calendarPageStatus" role="status" aria-live="polite">${loading ? '正在加载题目…' : page ? `第 ${current} 页 / 共 ${totalPages} 页 · 显示 ${start}–${end} / ${total} 道题目` : '每页 10 道题目'}</span><button class="button button-light" type="button" id="nextCalendarPageButton" ${!Number.isInteger(page?.nextOffset) || loading ? 'disabled' : ''}>下一页</button><form class="list-page-jump" id="calendarPageJumpForm" novalidate><label for="calendarPageInput">跳到 <input id="calendarPageInput" type="text" inputmode="numeric" value="${esc(state.calendarJumpDraft)}" aria-label="题目页码" aria-describedby="calendarPageJumpError" ${state.calendarJumpError ? 'aria-invalid="true"' : ''} ${loading ? 'readonly' : !page || total === 0 ? 'disabled' : ''} /> 页</label><button class="button button-light" type="submit" id="calendarPageJumpButton" ${!page || loading || total === 0 ? 'disabled' : ''}>跳转</button></form><p class="list-page-jump-error" id="calendarPageJumpError" role="alert">${esc(state.calendarJumpError)}</p></div>`;
 }
 function calendarPageMessage(view) {
   if (state.calendarPageError) return `<div class="error-state" role="alert"><p>${esc(state.calendarPageError)}</p><button class="button button-light" id="retryCalendarPageButton" type="button">重试加载</button></div>`;
   if (!currentCalendarPage(view)) return '<div class="empty-state" role="status">正在加载题目…</div>';
-  return '<div class="empty-state">这个区域暂无题目。</div>';
+  return state.calendarSearchQuery ? `<div class="empty-state">没有符合“${esc(state.calendarSearchQuery)}”的题目。</div>` : '<div class="empty-state">这个区域暂无题目。</div>';
 }
 function calendarZoneNav(route) {
   return `<nav class="calendar-view-switch" aria-label="题目区域">${[['calendar','review','待审核区'],['leftovers','leftover','leftover 区'],['allocation','allocation','待分配区'],['finished','finished','完成区']].map(([name,area,label]) => `<a href="#${name}" class="${route===name?'active':''}">${label} <span>${state.calendarCounts?.[area] ?? '—'}</span></a>`).join('')}<a href="#pending" class="${route==='pending'?'active':''}">我的未完成</a></nav>`;
@@ -605,6 +636,7 @@ function calendarPuzzleRows(puzzles, area) {
   }).join('');
 }
 function renderCalendar(route = 'calendar') {
+  captureCalendarInputFocus();
   if (typeof route === 'boolean') route = route ? 'pending' : 'calendar';
   if (route === 'finished') return renderFinishedCalendar();
   const area = ({calendar:'review',leftovers:'leftover',allocation:'allocation'})[route];
@@ -613,10 +645,11 @@ function renderCalendar(route = 'calendar') {
   const title = ({calendar:'待审核区',leftovers:'leftover 区',allocation:'待分配区',pending:'我的未完成谜题'})[route] || '待审核区';
   const description = ({calendar:'新投稿进入这里；至少三名成员评分且平均分严格大于 0 后进入待分配区，一票否决后进入 leftover。',leftovers:'被否决的投稿保留在这里，重新进入会开启新一轮喜爱评分。',allocation:'补齐 Penpa 链接，完成规则与制图审计，再分配日期。',pending:'查看你尚未完成的题目；个人解题状态与日历区域分别记录。'})[route];
   const rows = calendarPuzzleRows(puzzles, area);
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1><p class="page-description">${description}</p></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarZoneNav(route)}<section class="calendar-toolbar"><div class="section-title-group"><h2>${title}</h2><span class="count-badge">${page?.total ?? '—'}</span></div><label for="calendarSort">排序</label><select id="calendarSort"><option value="date" ${state.calendarSort==='date'?'selected':''}>建议日期</option><option value="newest" ${state.calendarSort==='newest'?'selected':''}>最近提交</option></select></section><div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1><p class="page-description">${description}</p></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarZoneNav(route)}${calendarSearchMarkup(route)}<section class="calendar-toolbar"><div class="section-title-group"><h2>${title}</h2><span class="count-badge">${page?.total ?? '—'}</span></div><label for="calendarSort">排序</label><select id="calendarSort"><option value="date" ${state.calendarSort==='date'?'selected':''}>建议日期</option><option value="newest" ${state.calendarSort==='newest'?'selected':''}>最近提交</option></select></section><div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
 }
 function renderCalendarLeftovers() { return renderCalendar('leftovers'); }
 function renderFinishedCalendar() {
+  captureCalendarInputFocus();
   const year = state.calendarViewYear;
   const month = state.calendarMonth;
   const monthKey = `${year}-${String(month).padStart(2,'0')}`;
@@ -630,7 +663,7 @@ function renderFinishedCalendar() {
     return `<div class="month-calendar-day ${puzzle?'has-puzzle':''}" role="gridcell" aria-label="${date}${puzzle?` ${esc(puzzle.title)}`:' 空'}"><time datetime="${date}">${day}</time>${puzzle?`<a href="#calendar-puzzle-${puzzle.number}" data-month-puzzle>${esc(puzzle.title)}</a><small>${puzzle.rule?ruleLabel(puzzle.rule):''}</small>`:'<span class="month-calendar-empty">空</span>'}</div>`;
   })).join('');
   const rows = calendarPuzzleRows(page?.puzzles || [], 'finished');
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">COMPLETED CALENDAR</p><h1>完成区<span class="heading-period">.</span></h1><p class="page-description">至少三名成员评分且平均分严格大于 0、质量检查、三人制图审计和日期分配均完成的题目显示在这里；取消分配可返回待分配区。</p></div></section>${calendarZoneNav('finished')}<section class="month-calendar-toolbar"><label>年份 <input id="calendarViewYear" type="number" min="1000" max="9999" value="${year}" /></label><label>月份 <select id="calendarMonth">${Array.from({length:12},(_,index)=>`<option value="${index+1}" ${index+1===month?'selected':''}>${index+1} 月</option>`).join('')}</select></label><strong>${year} 年 ${month} 月 · ${page?.total ?? '—'} 道题目</strong></section>${page ? `<div class="month-calendar-weekdays">${['一','二','三','四','五','六','日'].map((day)=>`<span>周${day}</span>`).join('')}</div><div class="month-calendar-grid" role="grid" aria-label="${year} 年 ${month} 月完成题目">${cells}</div>` : ''}<div class="calendar-list">${rows || calendarPageMessage('finished')}</div>${calendarPaginationMarkup('finished')}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">COMPLETED CALENDAR</p><h1>完成区<span class="heading-period">.</span></h1><p class="page-description">至少三名成员评分且平均分严格大于 0、质量检查、三人制图审计和日期分配均完成的题目显示在这里；取消分配可返回待分配区。</p></div></section>${calendarZoneNav('finished')}${calendarSearchMarkup('finished')}<section class="month-calendar-toolbar"><label>年份 <input id="calendarViewYear" type="number" min="1000" max="9999" value="${year}" /></label><label>月份 <select id="calendarMonth">${Array.from({length:12},(_,index)=>`<option value="${index+1}" ${index+1===month?'selected':''}>${index+1} 月</option>`).join('')}</select></label><strong>${year} 年 ${month} 月 · ${page?.total ?? '—'} 道题目</strong></section>${page && !state.calendarSearchQuery ? `<div class="month-calendar-weekdays">${['一','二','三','四','五','六','日'].map((day)=>`<span>周${day}</span>`).join('')}</div><div class="month-calendar-grid" role="grid" aria-label="${year} 年 ${month} 月完成题目">${cells}</div>` : ''}<div class="calendar-list">${rows || calendarPageMessage('finished')}</div>${calendarPaginationMarkup('finished')}</div>`;
 }
 function renderCalendarDateInputs(prefix, year = 2028, monthDay = '') {
   const [monthValue = '', dayValue = ''] = String(monthDay || '').split('-');
@@ -705,7 +738,8 @@ function renderMessages() {
   const filtered = state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all';
   const empty = state.inboxLoading ? '<div class="empty-state" role="status">正在加载通知…</div>' : state.inboxError ? '<div class="empty-state">通知加载失败，请刷新重试。</div>' : `<div class="empty-state">${filtered ? '没有符合筛选条件的通知。' : '目前没有通知。'}</div>`;
   const navigationBusy = state.inboxLoading || state.inboxPendingIds.size || state.inboxReadAllPending || state.usernameRenamePending;
-  const pagination = `<nav class="list-pagination" aria-label="收件箱分页"><button class="button button-light" id="previousInboxPageButton" type="button" ${navigationBusy || state.inboxPageIndex === 0 ? 'disabled' : ''}>上一页</button><span id="inboxPageStatus" role="status" aria-live="polite">第 ${state.inboxPageIndex + 1} 页 · 本页 ${notifications.length} 条 · 每页 ${INBOX_PAGE_SIZE} 条</span><button class="button button-light" id="nextInboxPageButton" type="button" ${navigationBusy || !state.inboxNextBefore ? 'disabled' : ''}>${state.inboxLoading && state.inboxPages.length ? '正在加载…' : '下一页'}</button></nav>`;
+  const totalPages = Math.max(1, Math.ceil(state.inboxTotal / INBOX_PAGE_SIZE));
+  const pagination = `<nav class="list-pagination" aria-label="收件箱分页"><button class="button button-light" id="previousInboxPageButton" type="button" ${navigationBusy || state.inboxPageIndex === 0 ? 'disabled' : ''}>上一页</button><span id="inboxPageStatus" role="status" aria-live="polite">第 ${state.inboxPageIndex + 1} 页 / 共 ${totalPages} 页 · 本页 ${notifications.length} 条 · 每页 ${INBOX_PAGE_SIZE} 条</span><button class="button button-light" id="nextInboxPageButton" type="button" ${navigationBusy || state.inboxPageIndex + 1 >= totalPages ? 'disabled' : ''}>${state.inboxLoading && state.inboxPages.length ? '正在加载…' : '下一页'}</button><form id="inboxPageJumpForm" class="list-page-jump" novalidate><label for="inboxPageInput">跳至</label><input id="inboxPageInput" type="text" inputmode="numeric" autocomplete="off" max="${totalPages}" value="${esc(state.inboxPageJumpValue)}" aria-label="收件箱页码" aria-describedby="inboxPageJumpError" aria-invalid="${Boolean(state.inboxPageJumpError)}" ${navigationBusy || !state.inboxTotal ? 'disabled' : ''} /><span>页</span><button class="button button-light" id="jumpInboxPageButton" type="submit" ${navigationBusy || !state.inboxTotal ? 'disabled' : ''}>跳转</button></form><p id="inboxPageJumpError" class="list-page-jump-error" role="alert">${esc(state.inboxPageJumpError)}</p></nav>`;
   return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>MEMBER INBOX</p><h1>收件箱<span class="heading-period">.</span></h1><p class="page-description">仅显示发送给你的系统通知；成员之间的私聊不在这里。</p></div><div class="inbox-heading-actions"><button class="button button-light" id="refreshInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在刷新…' : '刷新通知'}</button>${state.inboxUnreadCount > 0 ? `<button class="button button-light" id="markAllInboxReadButton" type="button" title="将整个收件箱的未读通知标记为已读" ${state.inboxReadAllPending || state.inboxLoading || state.inboxPendingIds.size || state.usernameRenamePending ? 'disabled' : ''}>${state.inboxReadAllPending ? '正在标记…' : '全部标记已读'}</button>` : ''}</div></section>${inboxFilterMarkup()}${state.inboxActionError ? `<p class="inbox-error" role="alert">${esc(state.inboxActionError)}</p>` : ''}${state.inboxError ? `<p class="inbox-error" role="alert">${esc(state.inboxError)}</p>` : ''}<section class="inbox-list" aria-label="系统通知" aria-busy="${state.inboxLoading}">${items || empty}</section>${pagination}</div>`;
 }
 function matchesInboxFilters(item) {
@@ -725,6 +759,9 @@ function resetInboxPagination() {
   cancelInboxPrefetch();
   state.inboxPages = [];
   state.inboxPageIndex = 0;
+  state.inboxTotal = 0;
+  state.inboxPageJumpValue = '1';
+  state.inboxPageJumpError = '';
   state.inboxNextBefore = null;
   state.inboxLoading = false;
 }
@@ -733,26 +770,25 @@ function showInboxPage(index) {
   state.inboxPageIndex = index;
   state.inboxItems = page.notifications;
   state.inboxNextBefore = page.nextBefore;
+  state.inboxTotal = page.total;
+  state.inboxPageJumpValue = String(index + 1);
+  state.inboxPageJumpError = '';
   state.inboxError = '';
 }
-function prefetchInboxNextPage() {
-  if (!state.user || state.inboxLoading || state.inboxPendingIds.size || state.inboxReadAllPending || state.usernameRenamePending || getRoute().name !== 'messages') return null;
-  const index = state.inboxPageIndex + 1;
-  const before = state.inboxPages[index - 1]?.nextBefore;
-  if (!before || state.inboxPages[index]?.before === before) return null;
-  if (inboxPrefetchRequest?.index === index && inboxPrefetchRequest.before === before) return inboxPrefetchRequest;
+function requestInboxPage(index) {
+  if (inboxPrefetchRequest?.index === index) return inboxPrefetchRequest;
   cancelInboxPrefetch();
   const attempt = inboxLoadAttempt;
   const epoch = state.sessionEpoch; const userId = state.user.id;
   const controller = new AbortController();
-  const request = { index, before, controller, promise: null, error: '' };
+  const request = { index, controller, promise: null, error: '' };
   inboxPrefetchRequest = request;
-  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter, before: String(before) });
+  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter, offset: String(index * INBOX_PAGE_SIZE) });
   request.promise = (async () => {
     try {
       const data = await apiRequest(`/api/inbox?${params}`, { signal: controller.signal });
-      if (!isCurrentUserSession(epoch, userId) || attempt !== inboxLoadAttempt || inboxPrefetchRequest !== request || state.inboxPages[index - 1]?.nextBefore !== before) return null;
-      const page = { before, notifications: data.notifications || [], nextBefore: data.nextBefore || null };
+      if (!isCurrentUserSession(epoch, userId) || attempt !== inboxLoadAttempt || inboxPrefetchRequest !== request) return null;
+      const page = { notifications: data.notifications || [], nextBefore: data.nextBefore || null, total: Number(data.total || 0) };
       state.inboxPages[index] = page;
       return page;
     } catch (error) {
@@ -764,12 +800,19 @@ function prefetchInboxNextPage() {
   })();
   return request;
 }
+function prefetchInboxNextPage() {
+  if (!state.user || state.inboxLoading || state.inboxPendingIds.size || state.inboxReadAllPending || state.usernameRenamePending || getRoute().name !== 'messages') return null;
+  const index = state.inboxPageIndex + 1;
+  if (index * INBOX_PAGE_SIZE >= state.inboxTotal || state.inboxPages[index]) return null;
+  return requestInboxPage(index);
+}
 async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { clear = false } = {}) {
   if (!isCurrentUserSession(epoch, userId)) return false;
-  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter });
+  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter, offset: '0' });
   const previousIndex = state.inboxPageIndex;
+  const previousTotal = state.inboxTotal;
   resetInboxPagination();
-  if (!clear) state.inboxPageIndex = previousIndex;
+  if (!clear) { state.inboxPageIndex = previousIndex; state.inboxTotal = previousTotal; state.inboxPageJumpValue = String(previousIndex + 1); }
   const attempt = inboxLoadAttempt;
   const controller = new AbortController();
   inboxLoadController = controller;
@@ -780,7 +823,7 @@ async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id,
   try {
     const data = await apiRequest(`/api/inbox?${params.toString()}`, { signal: controller.signal });
     if (!isCurrent()) return false;
-    state.inboxPages = [{ before: null, notifications: data.notifications || [], nextBefore: data.nextBefore || null }];
+    state.inboxPages = [{ notifications: data.notifications || [], nextBefore: data.nextBefore || null, total: Number(data.total || 0) }];
     showInboxPage(0);
     state.inboxUnreadCount = Number(data.unreadCount || 0);
     return true;
@@ -853,9 +896,11 @@ async function markAllInboxRead() {
   }
 }
 async function changeInboxPage(direction) {
+  await loadInboxPage(state.inboxPageIndex + direction);
+}
+async function loadInboxPage(index) {
   if (!state.user || state.inboxLoading || state.inboxPendingIds.size || state.inboxReadAllPending || state.usernameRenamePending) return;
-  const index = state.inboxPageIndex + direction;
-  if (index < 0 || (direction > 0 && !state.inboxNextBefore)) return;
+  if (!Number.isSafeInteger(index) || index < 0 || index >= Math.max(1, Math.ceil(state.inboxTotal / INBOX_PAGE_SIZE))) return;
   if (state.inboxPages[index]) {
     cancelInboxPrefetch();
     showInboxPage(index);
@@ -863,18 +908,37 @@ async function changeInboxPage(direction) {
     prefetchInboxNextPage();
     return;
   }
-  const request = prefetchInboxNextPage();
-  if (!request) return;
+  const request = requestInboxPage(index);
   const attempt = inboxLoadAttempt;
   const epoch = state.sessionEpoch; const userId = state.user.id;
-  state.inboxLoading = true; state.inboxError = ''; renderRoute();
+  state.inboxLoading = true; state.inboxError = ''; state.inboxPageJumpError = ''; renderRoute();
   const page = await request.promise;
   if (!isCurrentUserSession(epoch, userId) || attempt !== inboxLoadAttempt) return;
   state.inboxLoading = false;
+  if (page && !page.notifications.length && index > 0 && index * INBOX_PAGE_SIZE >= page.total) {
+    state.inboxTotal = page.total;
+    state.inboxPages = [];
+    await loadInboxPage(Math.max(0, Math.ceil(page.total / INBOX_PAGE_SIZE) - 1));
+    return;
+  }
   if (page) showInboxPage(index);
   else state.inboxError = request.error || '下一页加载失败，请再次点击下一页重试。';
   renderRoute();
   if (page) prefetchInboxNextPage();
+}
+function jumpInboxPage() {
+  if (!state.user || getRoute().name !== 'messages' || state.inboxLoading || state.inboxPendingIds.size || state.inboxReadAllPending || state.usernameRenamePending) return;
+  const value = state.inboxPageJumpValue.trim();
+  const page = /^\d+$/.test(value) ? Number(value) : NaN;
+  const totalPages = Math.max(1, Math.ceil(state.inboxTotal / INBOX_PAGE_SIZE));
+  if (!Number.isSafeInteger(page) || page < 1 || page > totalPages || !state.inboxTotal) {
+    state.inboxPageJumpError = state.inboxTotal ? `请输入 1–${totalPages} 之间的整数页码。` : '目前没有可跳转的消息。';
+    document.querySelector('#inboxPageJumpError').textContent = state.inboxPageJumpError;
+    document.querySelector('#inboxPageInput').setAttribute('aria-invalid', 'true');
+    return;
+  }
+  state.inboxPageJumpError = '';
+  void loadInboxPage(page - 1);
 }
 function changeInboxFilters(read, tag) {
   state.inboxReadFilter = read; state.inboxTagFilter = tag; state.inboxActionError = '';
@@ -887,6 +951,13 @@ function bindMessages() {
   document.querySelector('#markAllInboxReadButton')?.addEventListener('click', markAllInboxRead);
   document.querySelector('#previousInboxPageButton')?.addEventListener('click', () => { void changeInboxPage(-1); });
   document.querySelector('#nextInboxPageButton')?.addEventListener('click', () => { void changeInboxPage(1); });
+  document.querySelector('#inboxPageInput')?.addEventListener('input', (event) => {
+    state.inboxPageJumpValue = event.target.value;
+    state.inboxPageJumpError = '';
+    document.querySelector('#inboxPageJumpError').textContent = '';
+    event.target.setAttribute('aria-invalid', 'false');
+  });
+  document.querySelector('#inboxPageJumpForm')?.addEventListener('submit', (event) => { event.preventDefault(); jumpInboxPage(); });
   document.querySelector('#inboxReadFilter')?.addEventListener('change', (event) => changeInboxFilters(event.target.value, state.inboxTagFilter));
   document.querySelector('#inboxTagFilter')?.addEventListener('change', (event) => changeInboxFilters(state.inboxReadFilter, event.target.value));
   document.querySelector('#resetInboxFiltersButton')?.addEventListener('click', () => changeInboxFilters('all', 'all'));
@@ -1585,6 +1656,60 @@ function openTagEditor(number) { openModal(`<p class="modal-eyebrow">PUZZLE TAGS
 function bindBlank(puzzle) { document.querySelector('#checkBlankButton')?.addEventListener('click', () => { const answer = document.querySelector('#blankAnswer').value.trim().toLowerCase(); const expected = String(puzzle.answer || '').toLowerCase(); const result = document.querySelector('#blankResult'); if (!answer) { result.textContent = '请填写答案。'; result.className = 'blank-result error'; } else if (expected && answer === expected) { result.textContent = '答案正确，可以提交完成记录。'; result.className = 'blank-result success'; } else { result.textContent = expected ? '还不正确，再试一次。' : '答案已记录，点击完成后进行评分。'; result.className = 'blank-result'; } }); }
 function bindCalendar(routeName = 'calendar') {
   const origin = routeName;
+  const searchInput = document.querySelector('#calendarSearchInput');
+  searchInput?.addEventListener('input', () => {
+    state.calendarSearchDraft = searchInput.value;
+    state.calendarSearchError = '';
+    document.querySelector('#calendarSearchError').textContent = '';
+  });
+  const search = (clear = false) => {
+    const query = clear ? '' : String(searchInput?.value || '').trim();
+    if (query.length > 200) {
+      state.calendarSearchError = '搜索内容不能超过 200 个字符。';
+      document.querySelector('#calendarSearchError').textContent = state.calendarSearchError;
+      return;
+    }
+    state.calendarSearchQuery = query;
+    state.calendarSearchDraft = query;
+    state.calendarSearchError = '';
+    state.calendarPageOffset = 0;
+    state.calendarJumpDraft = '1';
+    state.calendarJumpError = '';
+    state.calendarCounts = null;
+    invalidateCalendarPages();
+    void loadCalendarPage(origin);
+  };
+  document.querySelector('#calendarSearchForm')?.addEventListener('submit', (event) => { event.preventDefault(); search(); });
+  document.querySelector('#clearCalendarSearchButton')?.addEventListener('click', () => { search(true); document.querySelector('#calendarSearchInput')?.focus(); });
+  const jumpInput = document.querySelector('#calendarPageInput');
+  const showJumpError = (message) => {
+    state.calendarJumpError = message;
+    document.querySelector('#calendarPageJumpError').textContent = message;
+    jumpInput?.setAttribute('aria-invalid', String(Boolean(message)));
+  };
+  jumpInput?.addEventListener('input', () => { state.calendarJumpDraft = jumpInput.value; showJumpError(''); });
+  document.querySelector('#calendarPageJumpForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const current = currentCalendarPage(origin);
+    if (state.calendarPageLoading || !current || !Number(current.total)) return;
+    const value = String(jumpInput?.value || '').trim();
+    const totalPages = Math.max(1, Math.ceil(Number(current.total) / CALENDAR_PAGE_SIZE));
+    const number = Number(value);
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < 1) {
+      showJumpError('请输入大于或等于 1 的整数页码。');
+      return;
+    }
+    if (number > totalPages) {
+      showJumpError(`页码需在 1–${totalPages} 之间。`);
+      return;
+    }
+    showJumpError('');
+    state.calendarJumpDraft = String(number);
+    const offset = (number - 1) * CALENDAR_PAGE_SIZE;
+    if (offset === state.calendarPageOffset) { jumpInput.value = state.calendarJumpDraft; return; }
+    state.calendarPageOffset = offset;
+    void loadCalendarPage(origin);
+  });
   document.querySelector('#calendarMonth')?.addEventListener('change', (event) => {
     state.calendarMonth = Number(event.target.value);
     selectCalendarQuery(origin);
@@ -1610,12 +1735,16 @@ function bindCalendar(routeName = 'calendar') {
   document.querySelector('#previousCalendarPageButton')?.addEventListener('click', () => {
     if (state.calendarPageLoading || state.calendarPageOffset <= 0) return;
     state.calendarPageOffset = Math.max(0, state.calendarPageOffset - CALENDAR_PAGE_SIZE);
+    state.calendarJumpDraft = String(Math.floor(state.calendarPageOffset / CALENDAR_PAGE_SIZE) + 1);
+    state.calendarJumpError = '';
     void loadCalendarPage(origin);
   });
   document.querySelector('#nextCalendarPageButton')?.addEventListener('click', () => {
     const next = currentCalendarPage(origin)?.nextOffset;
     if (state.calendarPageLoading || !Number.isInteger(next)) return;
     state.calendarPageOffset = next;
+    state.calendarJumpDraft = String(Math.floor(next / CALENDAR_PAGE_SIZE) + 1);
+    state.calendarJumpError = '';
     void loadCalendarPage(origin);
   });
   document.querySelector('#retryCalendarPageButton')?.addEventListener('click', () => { void loadCalendarPage(origin); });
@@ -1624,6 +1753,12 @@ function bindCalendar(routeName = 'calendar') {
     state.calendarReturnRoute = origin;
     if (!event.target.closest('a')) window.location.hash = `#${row.dataset.puzzleRoute}`;
   }));
+  const focus = state.calendarInputFocus;
+  state.calendarInputFocus = null;
+  if (focus) {
+    const input = document.getElementById(focus.id);
+    if (input && !input.disabled) { input.focus({ preventScroll: true }); input.setSelectionRange(focus.start, focus.end); }
+  }
 }
 function bindLeftovers() { document.querySelectorAll('.calendar-row').forEach((row) => row.addEventListener('click', (event) => { if (event.defaultPrevented || event.target.closest('button')) return; state.calendarReturnRoute = 'leftovers'; if (!event.target.closest('a')) window.location.hash = `#${row.dataset.puzzleRoute}`; })); }
 

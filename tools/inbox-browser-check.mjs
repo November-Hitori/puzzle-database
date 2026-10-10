@@ -62,7 +62,7 @@ function holdIntercept(action) {
 function inboxGets(start = 0, match = () => true) {
   return requests.slice(start).filter((entry) => entry.method === 'GET' && entry.path === '/api/inbox' && match(new URLSearchParams(entry.query)));
 }
-const hasBefore = (before) => (url) => url.searchParams.get('before') === String(before);
+const hasOffset = (offset) => (url) => url.searchParams.get('offset') === String(offset);
 const item = (id) => page.locator(`article.inbox-item[data-inbox-id="${id}"]`);
 const tag = (id, name) => page.locator(`button[data-inbox-id="${id}"][data-inbox-tag="${name}"]`);
 async function waitCount(count) {
@@ -71,6 +71,16 @@ async function waitCount(count) {
 async function waitPage(number, count = 10) {
   await waitCount(count);
   await page.waitForFunction((expected) => document.querySelector('#inboxPageStatus')?.textContent.includes(`第 ${expected} 页`), number);
+}
+async function jumpPage(number, count = 10, { enter = false } = {}) {
+  await page.locator('#inboxPageInput').fill(String(number));
+  if (enter) await page.locator('#inboxPageInput').press('Enter');
+  else await page.locator('#jumpInboxPageButton').click();
+  await waitPage(number, count);
+}
+async function assertPageCount(count) {
+  assert.equal(await page.locator('#inboxPageInput').getAttribute('max'), String(count));
+  assert.ok((await page.locator('#inboxPageStatus').textContent()).includes(`共 ${count} 页`));
 }
 async function visibleIds() {
   return page.locator('article.inbox-item').evaluateAll((nodes) => nodes.map((node) => Number(node.dataset.inboxId)));
@@ -134,8 +144,8 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (incoming) => { const url = new URL(incoming.url()); if (url.origin === base) requests.push({ method: incoming.method(), path: url.pathname, query: url.search }); });
   const guidelineHold = holdIntercept({ path: '/api/penpa-guidelines' });
-  const secondPageBefore = fixtures.find(({ number }) => number === 43).id;
-  const secondPageHold = holdIntercept({ path: '/api/inbox', match: hasBefore(secondPageBefore) });
+  const secondPageOffset = 10;
+  const secondPageHold = holdIntercept({ path: '/api/inbox', match: hasOffset(secondPageOffset) });
   await page.goto(`${base}/#messages`, { waitUntil: 'domcontentloaded' });
   await login('InboxOwner');
   await waitPage(1);
@@ -146,12 +156,16 @@ try {
   assert.equal(await page.locator('#previousInboxPageButton').isDisabled(), true);
   assert.equal(inboxGets().length, 2);
   assert.ok(inboxGets().every((entry) => new URLSearchParams(entry.query).get('limit') === '10'));
+  assert.ok(inboxGets().every((entry) => {
+    const query = new URLSearchParams(entry.query);
+    return query.has('offset') && !query.has('before');
+  }));
   assert.equal(requests.filter((entry) => entry.method === 'GET' && ['/api/calendar/puzzles', '/api/calendar/leftovers'].includes(entry.path)).length, 0);
   const pendingBefore = requests.length;
   await page.locator('#nextInboxPageButton').click();
   await page.waitForFunction(() => document.querySelector('.inbox-list')?.getAttribute('aria-busy') === 'true');
   assert.equal(await page.locator('article.inbox-item').count(), 10);
-  assert.equal(inboxGets(pendingBefore, (params) => params.get('before') === String(secondPageBefore)).length, 0);
+  assert.equal(inboxGets(pendingBefore, (params) => params.get('offset') === String(secondPageOffset)).length, 0);
   secondPageHold.release();
   await waitPage(2);
   await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 42 - index));
@@ -169,6 +183,53 @@ try {
   await waitPage(1);
   console.log('PASS: first ten render before guidelines or page two, one-page prefetch, pending next request reuse and cached previous/next navigation');
   await assertGlobalUnread(40);
+  await assertPageCount(6);
+
+  // Jump directly to a distant page. Only that page and its immediate next
+  // page should be fetched, even though intermediate pages were never visited.
+  const jumpPrefetchResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/inbox'
+    && hasOffset(50)(new URL(response.url())) && response.status() === 200);
+  const beforeJump = requests.length;
+  await jumpPage(5);
+  await assertVisibleNumbers([12, 11, 10, 9, 8, 7, 6, 5, 4, 3]);
+  await jumpPrefetchResponse; await delay(100);
+  assert.deepEqual(inboxGets(beforeJump).map((entry) => Number(new URLSearchParams(entry.query).get('offset'))).sort((a, b) => a - b), [40, 50]);
+  await assertPageCount(6);
+  const beforeLastPage = requests.length;
+  await jumpPage(6, 2, { enter: true });
+  await assertVisibleNumbers([2, 1]);
+  assert.equal(inboxGets(beforeLastPage).length, 0);
+  assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
+  await jumpPage(5);
+  const beforeMissingPrevious = requests.length;
+  await page.locator('#previousInboxPageButton').click(); await waitPage(4);
+  await assertVisibleNumbers([22, 21, 20, 19, 18, 17, 16, 15, 14, 13]);
+  assert.deepEqual(inboxGets(beforeMissingPrevious).map((entry) => Number(new URLSearchParams(entry.query).get('offset'))), [30]);
+  await jumpPage(1);
+  const beforeInvalidJump = requests.length;
+  for (const invalid of ['', '0', '-1', '1.5', '7', '9007199254740992']) {
+    await page.locator('#inboxPageInput').fill(invalid);
+    await page.locator('#jumpInboxPageButton').click();
+    await page.waitForFunction(() => document.querySelector('#inboxPageJumpError')?.textContent.trim().length > 0);
+    await waitPage(1);
+  }
+  assert.equal(inboxGets(beforeInvalidJump).length, 0);
+  await jumpPage(1);
+  await page.waitForFunction(() => !document.querySelector('#inboxPageJumpError')?.textContent.trim());
+  console.log('PASS: arbitrary page jumps request only the destination and next page, sparse previous-page fetch, two-item last page and invalid page validation');
+
+  // A pending jump must not restore an old page after the filter changes.
+  await page.locator('#refreshInboxButton').click(); await waitPage(1);
+  const staleJump = holdIntercept({ path: '/api/inbox', match: hasOffset(40) });
+  await page.locator('#inboxPageInput').fill('5'); await page.locator('#jumpInboxPageButton').click(); await staleJump.started;
+  await selectFilters('read', 'untagged', 10); await assertPageCount(2);
+  staleJump.release(); await delay(150);
+  await waitPage(1);
+  await assertVisibleNumbers([12, 11, 10, 9, 8, 7, 6, 5, 4, 3]);
+  await jumpPage(2, 2); await assertVisibleNumbers([2, 1]);
+  await assertGlobalUnread(40);
+  await selectFilters('all', 'all', 10); await assertPageCount(6);
+  console.log('PASS: a late jump cannot overwrite a new filtered page; filtered total pages and global unread count remain accurate');
   for (const name of ['star', 'flag', 'bookmark', 'heart']) {
     const button = tag(topId, name);
     assert.equal(await button.count(), 1);
@@ -222,22 +283,22 @@ try {
   // A failed background prefetch must preserve the current page. A failed
   // foreground retry must also keep that page and leave next available to retry.
   const failedPrefetchResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/inbox'
-    && new URL(response.url()).searchParams.get('before') === String(secondPageBefore) && response.status() === 500);
-  const failedPrefetch = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), fail: true });
+    && new URL(response.url()).searchParams.get('offset') === String(secondPageOffset) && response.status() === 500);
+  const failedPrefetch = intercept({ path: '/api/inbox', match: hasOffset(secondPageOffset), fail: true });
   await page.locator('#refreshInboxButton').click(); await waitPage(1);
   await failedPrefetch; await failedPrefetchResponse;
   await delay(100);
   assert.equal(await page.locator('article.inbox-item').count(), 10);
   assert.equal(await page.locator('#nextInboxPageButton').isEnabled(), true);
   const beforeRetry = requests.length;
-  const failedNext = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), fail: true });
+  const failedNext = intercept({ path: '/api/inbox', match: hasOffset(secondPageOffset), fail: true });
   await page.locator('#nextInboxPageButton').click(); await failedNext;
   await page.locator('.inbox-error').filter({ hasText: 'inbox simulated outage' }).waitFor();
   await waitPage(1);
   await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 52 - index));
   await page.locator('#nextInboxPageButton').click(); await waitPage(2);
   await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 42 - index));
-  assert.equal(inboxGets(beforeRetry, (params) => params.get('before') === String(secondPageBefore)).length, 2);
+  assert.equal(inboxGets(beforeRetry, (params) => params.get('offset') === String(secondPageOffset)).length, 2);
   assert.equal(await page.locator('.inbox-error').count(), 0);
   await page.locator('#previousInboxPageButton').click(); await waitPage(1);
   console.log('PASS: a failed prefetch and failed next request retain the current page; retry succeeds');
@@ -247,6 +308,7 @@ try {
   assert.equal(await page.locator('.inbox-item.is-unread').count(), 0);
   assert.equal(await page.locator('[data-inbox-tag][aria-pressed="true"]').count(), 0);
   await selectFilters('unread', 'tagged', 10);
+  await assertPageCount(4);
   await assertGlobalUnread(40);
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
   assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
@@ -274,7 +336,7 @@ try {
   await assertGlobalUnread(40);
   console.log('PASS: a late response for the previous filter cannot overwrite the current selection');
 
-  const stalePrefetch = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(secondPageBefore)(url)
+  const stalePrefetch = holdIntercept({ path: '/api/inbox', match: (url) => hasOffset(secondPageOffset)(url)
     && url.searchParams.get('read') === 'all' && url.searchParams.get('tag') === 'all' });
   await selectFilters('all', 'all', 10); await stalePrefetch.started;
   await selectFilters('unread', 'tagged', 10);
@@ -287,8 +349,7 @@ try {
   console.log('PASS: a previous filter\'s delayed prefetch cannot replace either the current page or its next page');
 
   // Adding a label removes the item from the untagged view and refills its page.
-  const untaggedBefore = fixtures.find(({ number }) => number === 11).id;
-  const staleTagPage = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(untaggedBefore)(url) && url.searchParams.get('tag') === 'untagged' });
+  const staleTagPage = holdIntercept({ path: '/api/inbox', match: (url) => hasOffset(10)(url) && url.searchParams.get('tag') === 'untagged' });
   await selectFilters('all', 'untagged', 10); await staleTagPage.started;
   await tag(topId, 'star').click(); await item(topId).waitFor({ state: 'detached' });
   await waitPage(1);
@@ -299,8 +360,7 @@ try {
   await selectFilters('all', 'all', 10);
   await waitPressed(topId, 'star', true);
   await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
-  const taggedBefore = fixtures.find(({ number }) => number === 35).id;
-  const staleReadPage = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(taggedBefore)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged' });
+  const staleReadPage = holdIntercept({ path: '/api/inbox', match: (url) => hasOffset(10)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged' });
   await selectFilters('unread', 'tagged', 10); await staleReadPage.started;
   const markId = fixtures.find(({ number }) => number === 44).id;
   await page.locator(`[data-inbox-read="${markId}"]`).click();
@@ -312,13 +372,12 @@ try {
   await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 33 - index));
   await assertGlobalUnread(39);
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
-  console.log('PASS: label and read mutations refill ten-item pages and invalidate stale prefetches and cursor boundaries');
+  console.log('PASS: label and read mutations refill ten-item pages and invalidate stale prefetches and page boundaries');
 
   // Renaming reloads private data while retaining the current inbox filters.
   // Its old list request must not leave loading flags or replace the new list.
   await selectFilters('unread', 'tagged', 10);
-  const renamedPageBefore = fixtures.find(({ number }) => number === 34).id;
-  const staleRename = intercept({ path: '/api/inbox', match: (url) => hasBefore(renamedPageBefore)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged', capture: true, delay: 2000 });
+  const staleRename = intercept({ path: '/api/inbox', match: (url) => hasOffset(10)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged', capture: true, delay: 2000 });
   await page.locator('#refreshInboxButton').click(); await staleRename;
   await page.locator('#changeUsernameButton').click();
   await page.locator('#newUsername').fill('InboxRenamed');
@@ -366,19 +425,24 @@ try {
   await page.locator('#modalBackdrop .modal-cancel').click();
   console.log('PASS: pending inbox saves defer username editing; a closed pending rename blocks writes, then retains filters and releases controls after an old response');
 
-  // Capture the owner's response, then log out and sign in as another member.
+  // Capture a direct page jump, then log out and sign in as another member.
   await selectFilters('all', 'all', 10);
-  const staleSession = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), capture: true, delay: 1300 });
-  await page.locator('#refreshInboxButton').click(); await staleSession;
+  const staleSession = intercept({ path: '/api/inbox', match: hasOffset(40), capture: true, delay: 1300 });
+  await page.locator('#inboxPageInput').fill('5'); await page.locator('#jumpInboxPageButton').click(); await staleSession;
   await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
   await login('InboxOther'); await waitCount(1); await assertGlobalUnread(1);
   await delay(1500);
   assert.equal(await item(otherId).count(), 1);
   assert.equal(await item(topId).count(), 0);
   assert.equal(await page.locator('article.inbox-item').count(), 1);
+  await waitPage(1, 1); await assertPageCount(1);
   await assertGlobalUnread(1);
   await page.locator('#markAllInboxReadButton').click(); await assertGlobalUnread(0);
   assert.equal(await item(otherId).locator('.inbox-read-label').count(), 1);
+  await selectFilters('unread', 'all', 0); await waitPage(1, 0); await assertPageCount(1);
+  assert.equal(await page.locator('#inboxPageInput').isDisabled(), true);
+  assert.equal(await page.locator('#previousInboxPageButton').isDisabled(), true);
+  assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
   assert.deepEqual(errors, []);
   fs.rmSync(path.join(screenshots, 'inbox-browser-failure.png'), { force: true });
   console.log(`PASS: logout isolation, another member's private inbox, mark-all-read and no page exceptions. Screenshots: ${screenshots}`);
