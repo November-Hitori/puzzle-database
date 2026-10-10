@@ -607,7 +607,8 @@ function captureCalendarInputFocus() {
 function calendarSearchMarkup(view) {
   const area = ({ calendar: '待审核区', pending: '我的未完成谜题', leftovers: 'leftover 区', allocation: '待分配区', finished: '完成区' })[view];
   const scope = view === 'finished' ? `${state.calendarViewYear} 年 ${state.calendarMonth} 月的完成区` : area;
-  return `<section class="calendar-search"><form id="calendarSearchForm" novalidate><label class="calendar-search-field" for="calendarSearchInput"><span>搜索题目</span><input id="calendarSearchInput" type="search" maxlength="200" value="${esc(state.calendarSearchDraft)}" placeholder="题号或题目名称" autocomplete="off" aria-describedby="calendarSearchScope calendarSearchError" /></label><div class="calendar-search-actions"><button class="button button-dark" id="calendarSearchButton" type="submit">搜索</button><button class="button button-light" id="clearCalendarSearchButton" type="button">清空</button></div></form><p class="calendar-search-scope" id="calendarSearchScope">搜索范围：${esc(scope)}</p><p class="calendar-search-error" id="calendarSearchError" role="alert">${esc(state.calendarSearchError)}</p></section>`;
+  const sort = view === 'finished' ? '' : `<label class="calendar-search-sort" for="calendarSort"><span>排序</span><select id="calendarSort"><option value="date" ${state.calendarSort==='date'?'selected':''}>建议日期</option><option value="newest" ${state.calendarSort==='newest'?'selected':''}>最近提交</option></select></label>`;
+  return `<section class="calendar-search"><form id="calendarSearchForm" novalidate><label class="calendar-search-field" for="calendarSearchInput"><span>搜索题目</span><input id="calendarSearchInput" type="search" maxlength="200" value="${esc(state.calendarSearchDraft)}" placeholder="题号或题目名称" autocomplete="off" aria-describedby="calendarSearchScope calendarSearchError" /></label><div class="calendar-search-actions"><button class="button button-dark" id="calendarSearchButton" type="submit">搜索</button>${sort}</div></form><p class="calendar-search-scope" id="calendarSearchScope">搜索范围：${esc(scope)}</p><p class="calendar-search-error" id="calendarSearchError" role="alert">${esc(state.calendarSearchError)}</p></section>`;
 }
 function calendarPaginationMarkup(view) {
   const page = currentCalendarPage(view);
@@ -644,7 +645,7 @@ function renderCalendar(route = 'calendar') {
   const puzzles = page?.puzzles || [];
   const title = ({calendar:'待审核区',leftovers:'leftover 区',allocation:'待分配区',pending:'我的未完成谜题'})[route] || '待审核区';
   const rows = calendarPuzzleRows(puzzles, area);
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarZoneNav(route)}${calendarSearchMarkup(route)}<section class="calendar-toolbar"><div class="section-title-group"><h2>${title}</h2><span class="count-badge">${page?.total ?? '—'}</span></div><label for="calendarSort">排序</label><select id="calendarSort"><option value="date" ${state.calendarSort==='date'?'selected':''}>建议日期</option><option value="newest" ${state.calendarSort==='newest'?'selected':''}>最近提交</option></select></section><div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarZoneNav(route)}${calendarSearchMarkup(route)}<div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
 }
 function renderCalendarLeftovers() { return renderCalendar('leftovers'); }
 function renderFinishedCalendar() {
@@ -1661,8 +1662,8 @@ function bindCalendar(routeName = 'calendar') {
     state.calendarSearchError = '';
     document.querySelector('#calendarSearchError').textContent = '';
   });
-  const search = (clear = false) => {
-    const query = clear ? '' : String(searchInput?.value || '').trim();
+  const search = () => {
+    const query = String(searchInput?.value || '').trim();
     if (query.length > 200) {
       state.calendarSearchError = '搜索内容不能超过 200 个字符。';
       document.querySelector('#calendarSearchError').textContent = state.calendarSearchError;
@@ -1679,7 +1680,6 @@ function bindCalendar(routeName = 'calendar') {
     void loadCalendarPage(origin);
   };
   document.querySelector('#calendarSearchForm')?.addEventListener('submit', (event) => { event.preventDefault(); search(); });
-  document.querySelector('#clearCalendarSearchButton')?.addEventListener('click', () => { search(true); document.querySelector('#calendarSearchInput')?.focus(); });
   const jumpInput = document.querySelector('#calendarPageInput');
   const showJumpError = (message) => {
     state.calendarJumpError = message;

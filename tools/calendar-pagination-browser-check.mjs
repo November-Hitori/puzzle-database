@@ -286,7 +286,8 @@ try {
   assert.equal(await page.locator('#calendarPageJumpButton').isDisabled(), true);
 
   const beforeClear = requests.length;
-  await page.locator('#clearCalendarSearchButton').click(); await waitPage(1); await delay(150);
+  await page.locator('#calendarSearchInput').fill('');
+  await page.locator('#calendarSearchInput').press('Enter'); await waitPage(1); await delay(150);
   assert.equal(await page.locator('#calendarSearchInput').inputValue(), '');
   assert.deepEqual(await visibleNumbers(), Array.from({ length: 10 }, (_, index) => 1000 + index));
   assert.equal(pageGets(beforeClear).length, 2, 'clearing returns to first page and restores one-page preload');
@@ -302,7 +303,8 @@ try {
   await page.evaluate(() => { window.location.hash = '#pending'; });
   await waitPage(1, 9);
   assert.equal(await page.locator('#calendarSearchInput').inputValue(), '稀疏匹配');
-  await page.locator('#clearCalendarSearchButton').click(); await waitPage(1);
+  await page.locator('#calendarSearchInput').fill('');
+  await page.locator('#calendarSearchInput').press('Enter'); await waitPage(1);
   await page.evaluate(() => { window.location.hash = '#finished'; }); await page.locator('#calendarViewYear').waitFor();
   await page.locator('#calendarViewYear').fill('2028'); await page.locator('#calendarViewYear').press('Tab');
   await page.locator('#calendarMonth').selectOption('1'); await waitPage(1);
@@ -317,7 +319,8 @@ try {
   assert.deepEqual(await visibleNumbers(), [februaryNumber]);
   assert.equal(await page.locator('#calendarSearchInput').inputValue(), '隔离分页题目');
   assert.equal(pageGets(beforeMonthSearch).length, 1);
-  await page.locator('#clearCalendarSearchButton').click(); await waitPage(1, 1);
+  await page.locator('#calendarSearchInput').fill('');
+  await page.locator('#calendarSearchInput').press('Enter'); await waitPage(1, 1);
   assert.equal(await page.locator('[data-month-puzzle]').count(), 1);
   assert.ok(pageGets().every((entry) => new URL(base + entry.path + entry.query).searchParams.get('limit') === '10'));
   assert.deepEqual(errors, []);
