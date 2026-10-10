@@ -388,6 +388,9 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .inbox-tag-button:disabled { cursor: wait; opacity: .55; }
 .inbox-error { color: var(--accent-deep); font-size: 11px; }
 .inbox-more { display: flex; justify-content: center; margin: 18px 0; }
+.list-pagination { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; padding: 20px 0; }
+.list-pagination [role="status"] { color: var(--muted); font-size: 12px; text-align: center; }
+@media (max-width: 520px) { .list-pagination { gap: 8px; } .list-pagination [role="status"] { flex-basis: 100%; order: -1; } }
 .rule-creator { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
 @media (max-width: 520px) {
   .calendar-date-fields { grid-template-columns: 1fr 1fr; }

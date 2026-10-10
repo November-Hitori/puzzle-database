@@ -40,7 +40,7 @@ await new Promise((resolve, reject) => { server.once('error', reject); server.li
 const base = `http://127.0.0.1:${server.address().port}`;
 const browserEnv = { ...process.env };
 if (process.env.PUZARCHIVE_BROWSER_LIB_DIR) browserEnv.LD_LIBRARY_PATH = [process.env.PUZARCHIVE_BROWSER_LIB_DIR, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
-const errors = [], requests = [], interceptions = [];
+const errors = [], requests = [], interceptions = [], releaseHolds = new Set();
 let browser, page;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function request(url, method = 'GET', body = null, cookie = '') {
@@ -53,10 +53,30 @@ function intercept(action) {
   interceptions.push({ ...action, started });
   return ready;
 }
+function holdIntercept(action) {
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  releaseHolds.add(release);
+  return { started: intercept({ ...action, capture: true, hold }), release: () => { release(); releaseHolds.delete(release); } };
+}
+function inboxGets(start = 0, match = () => true) {
+  return requests.slice(start).filter((entry) => entry.method === 'GET' && entry.path === '/api/inbox' && match(new URLSearchParams(entry.query)));
+}
+const hasBefore = (before) => (url) => url.searchParams.get('before') === String(before);
 const item = (id) => page.locator(`article.inbox-item[data-inbox-id="${id}"]`);
 const tag = (id, name) => page.locator(`button[data-inbox-id="${id}"][data-inbox-tag="${name}"]`);
 async function waitCount(count) {
   await page.waitForFunction((expected) => document.querySelectorAll('article.inbox-item').length === expected && !document.querySelector('#refreshInboxButton')?.disabled, count);
+}
+async function waitPage(number, count = 10) {
+  await waitCount(count);
+  await page.waitForFunction((expected) => document.querySelector('#inboxPageStatus')?.textContent.includes(`第 ${expected} 页`), number);
+}
+async function visibleIds() {
+  return page.locator('article.inbox-item').evaluateAll((nodes) => nodes.map((node) => Number(node.dataset.inboxId)));
+}
+async function assertVisibleNumbers(numbers) {
+  assert.deepEqual(await visibleIds(), numbers.map((number) => fixtures.find((fixture) => fixture.number === number).id));
 }
 async function waitPressed(id, name, pressed) {
   await page.waitForFunction(({ id, name, pressed }) => {
@@ -113,9 +133,41 @@ try {
   page.setDefaultTimeout(10000);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (incoming) => { const url = new URL(incoming.url()); if (url.origin === base) requests.push({ method: incoming.method(), path: url.pathname, query: url.search }); });
+  const guidelineHold = holdIntercept({ path: '/api/penpa-guidelines' });
+  const secondPageBefore = fixtures.find(({ number }) => number === 43).id;
+  const secondPageHold = holdIntercept({ path: '/api/inbox', match: hasBefore(secondPageBefore) });
   await page.goto(`${base}/#messages`, { waitUntil: 'domcontentloaded' });
   await login('InboxOwner');
-  await waitCount(20);
+  await waitPage(1);
+  await Promise.all([guidelineHold.started, secondPageHold.started]);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 52 - index));
+  assert.equal(await tag(topId, 'star').isEnabled(), true);
+  assert.equal(await page.locator('.inbox-list').getAttribute('aria-busy'), 'false');
+  assert.equal(await page.locator('#previousInboxPageButton').isDisabled(), true);
+  assert.equal(inboxGets().length, 2);
+  assert.ok(inboxGets().every((entry) => new URLSearchParams(entry.query).get('limit') === '10'));
+  assert.equal(requests.filter((entry) => entry.method === 'GET' && ['/api/calendar/puzzles', '/api/calendar/leftovers'].includes(entry.path)).length, 0);
+  const pendingBefore = requests.length;
+  await page.locator('#nextInboxPageButton').click();
+  await page.waitForFunction(() => document.querySelector('.inbox-list')?.getAttribute('aria-busy') === 'true');
+  assert.equal(await page.locator('article.inbox-item').count(), 10);
+  assert.equal(inboxGets(pendingBefore, (params) => params.get('before') === String(secondPageBefore)).length, 0);
+  secondPageHold.release();
+  await waitPage(2);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 42 - index));
+  await page.waitForFunction(() => !document.querySelector('#nextInboxPageButton')?.disabled);
+  await delay(150);
+  assert.equal(inboxGets().length, 3);
+  const beforeCachedNavigation = requests.length;
+  await page.locator('#previousInboxPageButton').click(); await waitPage(1);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 52 - index));
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2);
+  assert.equal(inboxGets(beforeCachedNavigation).length, 0);
+  await page.locator('#previousInboxPageButton').click(); await waitPage(1);
+  guidelineHold.release();
+  await delay(150);
+  await waitPage(1);
+  console.log('PASS: first ten render before guidelines or page two, one-page prefetch, pending next request reuse and cached previous/next navigation');
   await assertGlobalUnread(40);
   for (const name of ['star', 'flag', 'bookmark', 'heart']) {
     const button = tag(topId, name);
@@ -144,7 +196,7 @@ try {
   await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
   let persisted = await request('/api/inbox?limit=50', 'GET', null, ownerSession.cookie);
   assert.deepEqual([...persisted.body.notifications.find((entry) => entry.id === topId).tags].sort(), ['bookmark', 'flag', 'heart']);
-  await page.reload({ waitUntil: 'domcontentloaded' }); await waitCount(20);
+  await page.reload({ waitUntil: 'domcontentloaded' }); await waitCount(10);
   for (const name of ['flag', 'bookmark', 'heart']) assert.equal(await tag(topId, name).getAttribute('aria-pressed'), 'true');
   await snapshot('inbox-icons-browser-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
@@ -163,56 +215,110 @@ try {
   const failedRefresh = intercept({ path: '/api/inbox', fail: true });
   await page.locator('#refreshInboxButton').click(); await failedRefresh;
   await page.locator('.inbox-error').filter({ hasText: 'inbox simulated outage' }).waitFor();
-  await page.locator('#refreshInboxButton').click(); await waitCount(20);
+  await page.locator('#refreshInboxButton').click(); await waitCount(10);
   assert.equal(await page.locator('.inbox-error').count(), 0);
   console.log('PASS: failed tag update retains selection, click retry saves, inbox refresh failure and retry recover');
 
-  await selectFilters('read', 'untagged', 12);
+  // A failed background prefetch must preserve the current page. A failed
+  // foreground retry must also keep that page and leave next available to retry.
+  const failedPrefetchResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/inbox'
+    && new URL(response.url()).searchParams.get('before') === String(secondPageBefore) && response.status() === 500);
+  const failedPrefetch = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), fail: true });
+  await page.locator('#refreshInboxButton').click(); await waitPage(1);
+  await failedPrefetch; await failedPrefetchResponse;
+  await delay(100);
+  assert.equal(await page.locator('article.inbox-item').count(), 10);
+  assert.equal(await page.locator('#nextInboxPageButton').isEnabled(), true);
+  const beforeRetry = requests.length;
+  const failedNext = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), fail: true });
+  await page.locator('#nextInboxPageButton').click(); await failedNext;
+  await page.locator('.inbox-error').filter({ hasText: 'inbox simulated outage' }).waitFor();
+  await waitPage(1);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 52 - index));
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 42 - index));
+  assert.equal(inboxGets(beforeRetry, (params) => params.get('before') === String(secondPageBefore)).length, 2);
+  assert.equal(await page.locator('.inbox-error').count(), 0);
+  await page.locator('#previousInboxPageButton').click(); await waitPage(1);
+  console.log('PASS: a failed prefetch and failed next request retain the current page; retry succeeds');
+
+  await selectFilters('read', 'untagged', 10);
   await assertGlobalUnread(40);
   assert.equal(await page.locator('.inbox-item.is-unread').count(), 0);
   assert.equal(await page.locator('[data-inbox-tag][aria-pressed="true"]').count(), 0);
-  await selectFilters('unread', 'tagged', 20);
+  await selectFilters('unread', 'tagged', 10);
   await assertGlobalUnread(40);
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
-  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 20);
-  await page.locator('#loadMoreInboxButton').click(); await waitCount(32);
-  const loadedIds = await page.locator('article.inbox-item').evaluateAll((nodes) => nodes.map((node) => node.dataset.inboxId));
+  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
+  const loadedIds = await visibleIds();
+  for (const [number, count] of [[2, 10], [3, 10], [4, 2]]) {
+    await page.locator('#nextInboxPageButton').click(); await waitPage(number, count);
+    loadedIds.push(...await visibleIds());
+  }
   assert.equal(new Set(loadedIds).size, 32);
-  assert.equal(await page.locator('#loadMoreInboxButton').count(), 0);
+  assert.equal(loadedIds.length, 32);
+  assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
+  await page.locator('#previousInboxPageButton').click(); await waitPage(3);
   await assertGlobalUnread(40);
-  console.log('PASS: combined read/label filters, global unread badge and filtered pagination beyond twenty items');
+  console.log('PASS: combined read/label filters, global unread badge and ten-item pages without duplicate or missing notifications');
 
   // A filter response captured before the next filter change must not replace it.
-  await selectFilters('all', 'all', 20);
+  await selectFilters('all', 'all', 10);
   const staleFilter = intercept({ path: '/api/inbox', match: (url) => url.searchParams.get('read') === 'read', capture: true, delay: 1000 });
   await page.locator('#inboxReadFilter').selectOption('read'); await staleFilter;
-  await page.locator('#inboxReadFilter').selectOption('unread'); await waitCount(20);
+  await page.locator('#inboxReadFilter').selectOption('unread'); await waitCount(10);
   await delay(1200);
   assert.equal(await page.locator('#inboxReadFilter').inputValue(), 'unread');
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
-  assert.equal(await page.locator('article.inbox-item').count(), 20);
+  assert.equal(await page.locator('article.inbox-item').count(), 10);
   await assertGlobalUnread(40);
   console.log('PASS: a late response for the previous filter cannot overwrite the current selection');
 
+  const stalePrefetch = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(secondPageBefore)(url)
+    && url.searchParams.get('read') === 'all' && url.searchParams.get('tag') === 'all' });
+  await selectFilters('all', 'all', 10); await stalePrefetch.started;
+  await selectFilters('unread', 'tagged', 10);
+  stalePrefetch.release(); await delay(150);
+  await waitPage(1);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 44 - index));
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 34 - index));
+  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
+  console.log('PASS: a previous filter\'s delayed prefetch cannot replace either the current page or its next page');
+
   // Adding a label removes the item from the untagged view and refills its page.
-  await selectFilters('all', 'untagged', 20);
+  const untaggedBefore = fixtures.find(({ number }) => number === 11).id;
+  const staleTagPage = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(untaggedBefore)(url) && url.searchParams.get('tag') === 'untagged' });
+  await selectFilters('all', 'untagged', 10); await staleTagPage.started;
   await tag(topId, 'star').click(); await item(topId).waitFor({ state: 'detached' });
-  await waitCount(19);
-  await selectFilters('all', 'all', 20);
+  await waitPage(1);
+  staleTagPage.release(); await delay(150);
+  await assertVisibleNumbers([51, 50, 49, 48, 47, 46, 45, 12, 11, 10]);
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2, 9);
+  await assertVisibleNumbers([9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  await selectFilters('all', 'all', 10);
   await waitPressed(topId, 'star', true);
   await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
-  await selectFilters('unread', 'tagged', 20);
+  const taggedBefore = fixtures.find(({ number }) => number === 35).id;
+  const staleReadPage = holdIntercept({ path: '/api/inbox', match: (url) => hasBefore(taggedBefore)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged' });
+  await selectFilters('unread', 'tagged', 10); await staleReadPage.started;
   const markId = fixtures.find(({ number }) => number === 44).id;
   await page.locator(`[data-inbox-read="${markId}"]`).click();
   await item(markId).waitFor({ state: 'detached' });
+  await waitPage(1);
+  staleReadPage.release(); await delay(150);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 43 - index));
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 33 - index));
   await assertGlobalUnread(39);
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
-  console.log('PASS: label and read mutations remove messages that no longer match the active filters');
+  console.log('PASS: label and read mutations refill ten-item pages and invalidate stale prefetches and cursor boundaries');
 
   // Renaming reloads private data while retaining the current inbox filters.
   // Its old list request must not leave loading flags or replace the new list.
-  await selectFilters('unread', 'tagged', 20);
-  const staleRename = intercept({ path: '/api/inbox', match: (url) => url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged', capture: true, delay: 2000 });
+  await selectFilters('unread', 'tagged', 10);
+  const renamedPageBefore = fixtures.find(({ number }) => number === 34).id;
+  const staleRename = intercept({ path: '/api/inbox', match: (url) => hasBefore(renamedPageBefore)(url) && url.searchParams.get('read') === 'unread' && url.searchParams.get('tag') === 'tagged', capture: true, delay: 2000 });
   await page.locator('#refreshInboxButton').click(); await staleRename;
   await page.locator('#changeUsernameButton').click();
   await page.locator('#newUsername').fill('InboxRenamed');
@@ -227,7 +333,7 @@ try {
     assert.equal(await page.locator('#newUsername').count(), 0);
     // Finish a new list read while the rename remains pending, so the disabled
     // writes are protected by the rename guard rather than an inbox load.
-    await selectFilters('unread', 'tagged', 20);
+    await selectFilters('unread', 'tagged', 10);
     assert.equal(await page.locator('.inbox-list').getAttribute('aria-busy'), 'false');
     const protectedButtons = page.locator('[data-inbox-tag], [data-inbox-read], #markAllInboxReadButton, #changeUsernameButton');
     assert.ok(await protectedButtons.count());
@@ -241,18 +347,18 @@ try {
     assert.equal(requests.slice(beforeRename).filter((entry) => entry.path === '/api/account/username' && entry.method === 'PATCH').length, 1);
   } finally { finishRename(); }
   await page.waitForFunction(() => document.querySelector('#profileButton strong')?.textContent === 'InboxRenamed');
-  await waitCount(20);
+  await waitCount(10);
   await delay(2200);
   assert.equal(await page.locator('#inboxReadFilter').inputValue(), 'unread');
   assert.equal(await page.locator('#inboxTagFilter').inputValue(), 'tagged');
   assert.equal(await page.locator('.inbox-item.is-read').count(), 0);
-  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 20);
+  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
   assert.equal(await item(topId).count(), 0);
   assert.equal(await page.locator('#refreshInboxButton').isEnabled(), true);
   assert.equal(await page.locator('.inbox-error').count(), 0);
   await assertGlobalUnread(39);
-  await page.locator('#refreshInboxButton').click(); await waitCount(20);
-  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 20);
+  await page.locator('#refreshInboxButton').click(); await waitCount(10);
+  assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
   assert.equal(db.database.prepare('SELECT username FROM trusted_users WHERE id=?').get('inbox-owner').username, 'InboxRenamed');
   assert.equal(await page.locator('#changeUsernameButton').isEnabled(), true);
   assert.equal(await page.locator('[data-inbox-tag], [data-inbox-read], #markAllInboxReadButton').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
@@ -261,8 +367,8 @@ try {
   console.log('PASS: pending inbox saves defer username editing; a closed pending rename blocks writes, then retains filters and releases controls after an old response');
 
   // Capture the owner's response, then log out and sign in as another member.
-  await selectFilters('all', 'all', 20);
-  const staleSession = intercept({ path: '/api/inbox', capture: true, delay: 1300 });
+  await selectFilters('all', 'all', 10);
+  const staleSession = intercept({ path: '/api/inbox', match: hasBefore(secondPageBefore), capture: true, delay: 1300 });
   await page.locator('#refreshInboxButton').click(); await staleSession;
   await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
   await login('InboxOther'); await waitCount(1); await assertGlobalUnread(1);
@@ -281,6 +387,7 @@ try {
   console.error(`Inbox browser failure screenshot directory: ${screenshots}`);
   throw error;
 } finally {
+  for (const release of releaseHolds) release();
   await browser?.close();
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));

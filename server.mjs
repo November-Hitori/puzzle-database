@@ -7,7 +7,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   addCalendarPuzzle, addFolder, addPuzzle, addPuzzleTag, addRule, calendarPuzzleExists,
   authBootstrapComplete, bootstrapLegacyAuth, completeAndRate, createSession, deleteSession, findSession, findUserByUsernameKey, getCalendarPuzzle,
-  getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
+  getCalendarPuzzles, getCalendarPage, getCollection, getCollections, getFolders, getPuzzles, getRule,
   getRules, getTags, registerAccountWithGate, renameAccount, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
   updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
   setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead, setInboxNotificationTags
@@ -345,6 +345,17 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
   }
 
   if (request.method==='GET' && pathname==='/api/penpa-guidelines') return sendJson(response,200,getPenpaGuidelines());
+  if (request.method==='GET' && pathname==='/api/calendar/page') {
+    const params=new URL(request.url,`http://${request.headers.host||'localhost'}`).searchParams;
+    const integer=(key,fallback)=>params.has(key)&&/^\d+$/.test(params.get(key))?Number(params.get(key)):params.has(key)?NaN:fallback;
+    const limit=integer('limit',10),offset=integer('offset',0),year=integer('year',2028),month=integer('month',1);
+    const view=params.get('view')??'calendar',sort=params.get('sort')??'date';
+    if(!Number.isSafeInteger(limit)||limit<1||limit>50||!Number.isSafeInteger(offset)||offset<0
+      ||!Number.isSafeInteger(year)||year<1000||year>9999||!Number.isSafeInteger(month)||month<1||month>12
+      ||!['calendar','pending','leftovers','allocation','finished'].includes(view)||!['date','newest'].includes(sort))
+      return sendJson(response,400,{error:'invalid calendar pagination or filter'});
+    return sendJson(response,200,getCalendarPage(user.id,{limit,offset,view,sort,year,month}));
+  }
   if (request.method==='GET' && pathname==='/api/calendar/puzzles') return sendJson(response,200,{puzzles:getCalendarPuzzles(user.id)});
   if (request.method==='GET' && pathname==='/api/calendar/leftovers') return sendJson(response,200,{puzzles:getCalendarLeftovers(user.id)});
   const calendarMatch=pathname.match(/^\/api\/calendar\/puzzles\/(\d+)$/);

@@ -531,19 +531,19 @@ function getErrorIgnores(entityType,entityId) {
     FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
     WHERE i.entity_type=? AND i.entity_id=?`).all(entityType,entityId);
 }
-function getCalendarQuality(row,rule,guidelines=getPenpaGuidelines()) {
+function getCalendarQuality(row,rule,guidelines=getPenpaGuidelines(),qualityData=null) {
   const errors=[];
   if (!row.penpa_edit_url) errors.push({code:'missingPenpaEdit',item:'links',revision:row.penpa_revision,message:'缺少 Penpa 编辑链接'});
   if (!row.penpa_solve_url) errors.push({code:'missingPenpaSolve',item:'links',revision:row.penpa_revision,message:'缺少 Penpa 解题链接'});
   if (!rule) errors.push({code:'missingRule',revision:1,message:'所属规则不存在'});
   else for (const error of rule.quality.errors) errors.push({...error,key:`rule:${rule.id}:${error.key}`,inheritedIgnore:error.ignored,message:`所属规则：${error.message}`});
-  const annotated=annotateQualityErrors(errors,getErrorIgnores('puzzle',row.id));
-  const currentReviews=database.prepare(`SELECT v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
+  const annotated=annotateQualityErrors(errors,qualityData?qualityData.errorIgnores.get(row.id)||[]:getErrorIgnores('puzzle',row.id));
+  const currentReviews=(qualityData?qualityData.currentReviews.get(row.id)||[]:database.prepare(`SELECT v.user_id AS userId,u.name,u.username,v.decision,v.suggestion,v.updated_at AS updatedAt,
       (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
     FROM calendar_penpa_votes v JOIN trusted_users u ON u.id=v.user_id
     WHERE v.puzzle_id=? AND v.revision=? AND v.guidelines_revision=? ORDER BY v.updated_at,v.user_id`)
-    .all(row.id,row.penpa_revision,guidelines.revision).map((review)=>({...review,active:Boolean(review.active)}));
-  const history=database.prepare(`SELECT e.revision,e.guidelines_revision AS guidelinesRevision,e.decision,e.suggestion,e.created_at AS createdAt,u.name,u.username
+    .all(row.id,row.penpa_revision,guidelines.revision)).map((review)=>({...review,active:Boolean(review.active)}));
+  const history=qualityData?[]:database.prepare(`SELECT e.revision,e.guidelines_revision AS guidelinesRevision,e.decision,e.suggestion,e.created_at AS createdAt,u.name,u.username
     FROM calendar_penpa_audit_events e JOIN trusted_users u ON u.id=e.user_id WHERE e.puzzle_id=? ORDER BY e.id`).all(row.id);
   const approvalCount=currentReviews.filter((review)=>review.active&&review.decision==='approve').length;
   const rejected=currentReviews.some((review)=>review.decision==='reject');
@@ -996,6 +996,80 @@ export function getCalendarPuzzles(userId) {
   const rows = database.prepare("SELECT number FROM puzzles WHERE scope='calendar' AND calendar_status IN ('pending','approved') ORDER BY calendar_year,COALESCE(suggested_date,'9999-12-31'),number DESC").all();
   const context={guidelines:getPenpaGuidelines(),rules:new Map()};
   return rows.map(({number}) => puzzleByNumber(number,userId,'calendar',context));
+}
+function groupCalendarQualityRows(rows,idKey) {
+  const groups=new Map();
+  for(const source of rows) {
+    const id=source[idKey],row={...source};
+    delete row[idKey];
+    if(!groups.has(id)) groups.set(id,[]);
+    groups.get(id).push(row);
+  }
+  return groups;
+}
+function getCalendarPageQuality(guidelines) {
+  // Classifying the archive needs only current quality state. Histories, solving
+  // participants and detailed puzzle payloads are loaded for the requested page.
+  const rules=database.prepare(`${ruleSelectSql} WHERE EXISTS (
+    SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id
+  )`).all().map(ruleFromRow);
+  const ruleData={
+    errorIgnores:groupCalendarQualityRows(database.prepare(`SELECT i.entity_id AS ruleId,i.error_key AS key,i.revision
+      FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
+      WHERE i.entity_type='rule' AND EXISTS (SELECT 1 FROM puzzles p
+        WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=i.entity_id)`).all(),'ruleId'),
+    currentReviews:groupRuleQualityRows(database.prepare(`SELECT v.rule_id AS ruleId,v.item,v.decision,
+        (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
+      FROM rule_item_votes v JOIN trusted_users u ON u.id=v.user_id JOIN rules r ON r.id=v.rule_id
+      WHERE v.revision=CASE v.item WHEN 'name' THEN r.name_revision WHEN 'description' THEN r.description_revision WHEN 'example' THEN r.example_revision END
+        AND EXISTS (SELECT 1 FROM puzzles p WHERE p.scope='calendar' AND p.calendar_status='approved' AND p.rule_id=r.id)`).all()),
+    history:new Map(),revisions:new Map()
+  };
+  return {
+    rules:new Map(rules.map((rule)=>[rule.id,attachRuleQuality(rule,null,ruleData)])),
+    errorIgnores:groupCalendarQualityRows(database.prepare(`SELECT i.entity_id AS puzzleId,i.error_key AS key,i.revision
+      FROM quality_error_ignores i JOIN trusted_users u ON u.id=i.ignored_by
+      JOIN puzzles p ON p.id=i.entity_id
+      WHERE i.entity_type='puzzle' AND p.scope='calendar' AND p.calendar_status='approved'`).all(),'puzzleId'),
+    currentReviews:groupCalendarQualityRows(database.prepare(`SELECT v.puzzle_id AS puzzleId,v.decision,
+        (u.is_active=1 AND u.username IS NOT NULL AND u.password_hash IS NOT NULL) AS active
+      FROM calendar_penpa_votes v JOIN trusted_users u ON u.id=v.user_id JOIN puzzles p ON p.id=v.puzzle_id
+      WHERE p.scope='calendar' AND p.calendar_status='approved' AND v.revision=p.penpa_revision AND v.guidelines_revision=?`).all(guidelines.revision),'puzzleId')
+  };
+}
+export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='date',year=2028,month=1}={}) {
+  const guidelines=getPenpaGuidelines();
+  const rows=database.prepare(`SELECT p.id,p.number,p.title,p.rule_id,p.calendar_status,p.calendar_year,
+      p.suggested_date,p.assigned_date,(p.penpa_edit_url<>'') AS penpa_edit_url,
+      (p.penpa_solve_url<>'') AS penpa_solve_url,p.penpa_revision,
+      r.title_zh AS rule_title_zh,r.title_en AS rule_title_en,
+      EXISTS (SELECT 1 FROM puzzle_completions c WHERE c.puzzle_id=p.id AND c.user_id=?) AS completed
+    FROM puzzles p LEFT JOIN rules r ON r.id=p.rule_id
+    WHERE p.scope='calendar' AND p.calendar_status IN ('pending','approved','leftover')`).all(userId);
+  const qualityData=rows.some((row)=>row.calendar_status==='approved')?getCalendarPageQuality(guidelines):null;
+  const counts={review:0,leftover:0,allocation:0,finished:0};
+  for(const row of rows) {
+    if(row.calendar_status==='approved') {
+      const quality=getCalendarQuality(row,qualityData.rules.get(row.rule_id)||null,guidelines,qualityData);
+      row.area=getCalendarArea(row.calendar_status,quality.errors,quality.warnings);
+    } else row.area=getCalendarArea(row.calendar_status);
+    counts[row.area]++;
+  }
+  const monthKey=`${year}-${String(month).padStart(2,'0')}`;
+  const area=({calendar:'review',leftovers:'leftover',allocation:'allocation',finished:'finished'})[view];
+  const selected=rows.filter((row)=>view==='pending'?!row.completed&&row.area!=='leftover':
+    row.area===area&&(view!=='finished'||row.assigned_date?.startsWith(monthKey)));
+  const dateKey=(row)=>row.assigned_date||row.suggested_date||`${Number(row.calendar_year)||2028}-99-99`;
+  selected.sort((a,b)=>sort==='newest'?b.number-a.number:dateKey(a).localeCompare(dateKey(b))||b.number-a.number);
+  const pageRows=selected.slice(offset,offset+limit);
+  const context={guidelines,rules:new Map()};
+  return {
+    puzzles:pageRows.map(({number})=>puzzleByNumber(number,userId,'calendar',context)),
+    nextOffset:offset+pageRows.length<selected.length?offset+pageRows.length:null,
+    total:selected.length,counts,
+    ...(view==='finished'?{monthEntries:selected.map((row)=>({number:row.number,title:row.title,assignedDate:row.assigned_date,
+      ...(row.rule_title_zh!==null?{rule:{titleZh:row.rule_title_zh,titleEn:row.rule_title_en}}:{})}))}:{})
+  };
 }
 export function getCalendarPuzzle(number,userId) { return puzzleByNumber(number,userId,'calendar'); }
 export function getCalendarLeftovers(userId) {
