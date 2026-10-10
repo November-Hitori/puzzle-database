@@ -102,6 +102,27 @@ try {
   assert.equal((await request('/api/calendar/puzzles')).status, 401);
   console.log('PASS: Chromium registration, real session cookie, private bootstrap and anonymous API boundary');
 
+  // The calendar must remain usable while the full rule catalog is fetched on demand.
+  assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 0);
+  interception = { method: 'GET', path: '/api/rules', fail: true };
+  await page.locator('#addCalendarPuzzleButton').click();
+  await page.waitForFunction(() => document.querySelector('#requiredRulesError')?.textContent.includes('native simulated outage'));
+  assert.ok((await page.locator('#requiredRulesError').textContent()).includes('native simulated outage'));
+  assert.ok(await page.locator('.calendar-view-switch').isVisible());
+  assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 1);
+  interception = { method: 'GET', path: '/api/rules', delay: 900 };
+  await page.locator('#retryRequiredRulesButton').click();
+  await page.locator('#requiredRulesStatus').waitFor();
+  await page.evaluate(() => { window.location.hash = '#rules'; });
+  await page.locator('.empty-state').filter({ hasText: '正在加载规则目录' }).waitFor();
+  await page.locator('#newPuzzleTitle').waitFor();
+  assert.equal(requests.filter((entry) => entry.path === '/api/rules').length, 2);
+  assert.ok((await page.locator('.penpa-guidelines pre').textContent()).includes('Visibility OFF'));
+  await page.locator('#modalBackdrop .modal-cancel').click();
+  await page.locator('.rule-catalog').waitFor();
+  console.log('PASS: lazy rule catalog, calendar availability, submission loading/error/retry, shared request and guidelines');
+  await navigate('calendar', '.calendar-view-switch');
+
   const row = `.calendar-row[data-puzzle-route="calendar-puzzle-${spoiler.number}"]`;
   assert.equal(await page.locator(`${row} .spoiler-content`).evaluate((node) => node.hidden), true);
   await page.locator(`${row} .spoiler-toggle`).click(); assert.equal(new URL(page.url()).hash, '#calendar');
@@ -258,6 +279,21 @@ try {
   await page.locator('#authUsername').fill('BrowserRenamed');await page.locator('#authPassword').fill(password);await page.locator('#authForm [type="submit"]').click();await page.locator('.rule-catalog').waitFor();
   assert.equal(await page.locator('#profileButton strong').textContent(),'BrowserRenamed');
   console.log('PASS: username duplicate feedback, delayed rename, stable identity and login with unchanged password');
+
+  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor();
+  await page.evaluate(() => { window.location.hash = '#calendar'; });
+  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
+  interception = { method: 'GET', path: '/api/rules', delay: 1200 };
+  await page.evaluate(() => { window.location.hash = '#rules'; });
+  await page.locator('.empty-state').filter({ hasText: '正在加载规则目录' }).waitFor();
+  await page.locator('#profileButton').click(); await page.locator('#authUsername').waitFor(); await delay(1500);
+  assert.equal(await page.evaluate(() => document.body.dataset.authState), 'unauthenticated');
+  assert.equal(await page.locator('.rule-catalog').count(), 0);
+  await page.evaluate(() => { window.location.hash = '#calendar'; });
+  await page.locator('#authUsername').fill('BrowserRenamed'); await page.locator('#authPassword').fill(password); await page.locator('#authForm [type="submit"]').click(); await page.locator('.calendar-view-switch').waitFor();
+  assert.equal(await page.locator('.rule-catalog').count(), 0);
+  await navigate('rules', '.rule-catalog');
+  console.log('PASS: delayed rule response is isolated across logout and subsequent login');
   assert.deepEqual(errors, []);
   fs.rmSync(path.join(screenshots, 'calendar-browser-failure.png'), { force: true });
   console.log(`PASS: real veto, post-veto comment, reentry, password login and late-response logout isolation; no page exceptions. Screenshots: ${screenshots}`);
