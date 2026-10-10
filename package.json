@@ -7,7 +7,7 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "test": "node --test",
-    "test:browser": "node tools/browser-check.mjs"
+    "test:browser": "node tools/browser-check.mjs && node tools/inbox-browser-check.mjs"
   },
   "engines": {
     "node": ">=22"

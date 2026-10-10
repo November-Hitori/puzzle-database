@@ -3,6 +3,7 @@ import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 import { normalizeCalendarLinks, getCalendarArea } from './calendar-workflow-policy.mjs';
 import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES } from './calendar-review-policy.mjs';
+import { INBOX_TAGS } from './inbox-policy.mjs';
 
 const state = {
   puzzles: [],
@@ -22,6 +23,7 @@ const state = {
   sessionChecked: false,
   authMode: 'login',
   authBusy: false,
+  usernameRenamePending: false,
   authError: '',
   authEpoch: 0,
   logoutPending: false,
@@ -41,6 +43,8 @@ const state = {
   inboxActionError: '',
   inboxPendingIds: new Set(),
   inboxReadAllPending: false,
+  inboxReadFilter: 'all',
+  inboxTagFilter: 'all',
   lastPrivateRouteName: null,
   ruleFilter: 'all',
   ruleQuery: '',
@@ -56,6 +60,8 @@ const API_REQUEST_TIMEOUT_MS = 20000;
 let privateLoadAttempt = 0;
 let privateLoadController = null;
 let rulesLoadPromise = null;
+let inboxLoadAttempt = 0;
+let inboxLoadController = null;
 
 async function apiRequest(path, options = {}) {
   const authEndpoint = ['/api/session', '/api/register'].includes(path);
@@ -119,7 +125,7 @@ async function loadPrivateData() {
   renderRoute();
   try {
     const [calendarData, leftoverData, inboxData, guidelinesData] = await Promise.all([
-      '/api/calendar/puzzles', '/api/calendar/leftovers', '/api/inbox?limit=20', '/api/penpa-guidelines'
+      '/api/calendar/puzzles', '/api/calendar/leftovers', `/api/inbox?${new URLSearchParams({ limit: '20', read: state.inboxReadFilter, tag: state.inboxTagFilter })}`, '/api/penpa-guidelines'
     ].map((path) => apiRequest(path, { signal: controller.signal })));
     if (!isCurrentAttempt()) return;
     state.penpaGuidelines = guidelinesData;
@@ -187,7 +193,7 @@ function requireRulesForModal(title, openWhenReady) {
   retry.addEventListener('click', attempt);
   void attempt();
 }
-function clearPrivateState() { privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function clearPrivateState() { inboxLoadAttempt += 1; inboxLoadController?.abort(); inboxLoadController = null; privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.inboxReadFilter = 'all'; state.inboxTagFilter = 'all'; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; state.usernameRenamePending = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
@@ -475,94 +481,159 @@ function notificationEntityMarkup(notification) {
   }
   return '';
 }
+function inboxTagIcon(id) {
+  const shapes = {
+    star: '<path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9Z"/>',
+    flag: '<path d="M5 21V4m0 0c5-4 9 4 14 0v10c-5 4-9-4-14 0Z"/>',
+    bookmark: '<path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4Z"/>',
+    heart: '<path d="M20.8 4.8a5.5 5.5 0 0 0-7.8 0L12 5.9l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.4a5.5 5.5 0 0 0 0-7.8Z"/>'
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${shapes[id] || ''}</svg>`;
+}
+function inboxFilterMarkup() {
+  return `<section class="inbox-filters" aria-label="收件箱筛选"><label for="inboxReadFilter">阅读状态<select id="inboxReadFilter">${[['all', '全部消息'], ['unread', '未读'], ['read', '已读']].map(([value, label]) => `<option value="${value}" ${state.inboxReadFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label for="inboxTagFilter">标签状态<select id="inboxTagFilter">${[['all', '全部标签状态'], ['tagged', '有标签'], ['untagged', '无标签']].map(([value, label]) => `<option value="${value}" ${state.inboxTagFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>${state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all' ? '<button class="button button-light" type="button" id="resetInboxFiltersButton">清除筛选</button>' : ''}<span class="inbox-tag-hint">点击消息旁的图标添加或移除标签</span></section>`;
+}
 function renderMessages() {
   const notifications = state.inboxItems || [];
   const items = notifications.map((item) => {
     const id = String(item.id);
     const isRead = Boolean(item.readAt);
     const pending = state.inboxPendingIds.has(id);
-    return `<article class="inbox-item ${isRead ? 'is-read' : 'is-unread'}"><div class="inbox-item-copy"><div class="inbox-item-heading"><h2>${esc(item.title || '通知')}</h2><time>${esc(item.createdAt || '')}</time></div><p>${esc(item.body || '')}</p>${notificationEntityMarkup(item)}</div><div class="inbox-item-actions">${!isRead ? `<button class="button button-light" type="button" data-inbox-read="${esc(id)}" ${pending ? 'disabled' : ''}>${pending ? '正在标记…' : '标记已读'}</button>` : '<span class="inbox-read-label">已读</span>'}</div></article>`;
+    const disabled = pending || state.inboxLoading || state.inboxReadAllPending || state.usernameRenamePending;
+    const tags = item.tags || [];
+    const tagButtons = INBOX_TAGS.map(({ id: tagId, label }) => {
+      const selected = tags.includes(tagId);
+      const description = `${selected ? '移除' : '添加'}${label}标签`;
+      return `<button class="inbox-tag-button" type="button" data-inbox-tag="${tagId}" data-inbox-id="${esc(id)}" aria-label="${description}" title="${description}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}>${inboxTagIcon(tagId)}</button>`;
+    }).join('');
+    return `<article class="inbox-item ${isRead ? 'is-read' : 'is-unread'}" data-inbox-id="${esc(id)}"><div class="inbox-item-copy"><div class="inbox-item-heading"><h2>${esc(item.title || '通知')}</h2><time>${esc(item.createdAt || '')}</time></div><p>${esc(item.body || '')}</p>${notificationEntityMarkup(item)}</div><div class="inbox-item-actions"><div class="inbox-tag-options" role="group" aria-label="消息图标标签" aria-busy="${pending}">${tagButtons}</div>${!isRead ? `<button class="button button-light" type="button" data-inbox-read="${esc(id)}" ${disabled ? 'disabled' : ''}>${pending ? '正在保存…' : '标记已读'}</button>` : '<span class="inbox-read-label">已读</span>'}</div></article>`;
   }).join('');
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>MEMBER INBOX</p><h1>收件箱<span class="heading-period">.</span></h1><p class="page-description">仅显示发送给你的系统通知；成员之间的私聊不在这里。</p></div><div class="inbox-heading-actions"><button class="button button-light" id="refreshInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在刷新…' : '刷新通知'}</button>${notifications.some((item) => !item.readAt) ? `<button class="button button-light" id="markAllInboxReadButton" type="button" ${state.inboxReadAllPending ? 'disabled' : ''}>${state.inboxReadAllPending ? '正在标记…' : '全部标记已读'}</button>` : ''}</div></section>${state.inboxActionError ? `<p class="inbox-error" role="alert">${esc(state.inboxActionError)}</p>` : ''}${state.inboxError ? `<p class="inbox-error" role="alert">${esc(state.inboxError)}</p>` : ''}<section class="inbox-list" aria-label="系统通知">${items || (state.inboxLoading ? '<div class="empty-state" role="status">正在加载通知…</div>' : '<div class="empty-state">目前没有通知。</div>')}</section>${state.inboxNextBefore ? `<div class="inbox-more"><button class="button button-light" id="loadMoreInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在加载…' : '加载更多'}</button></div>` : ''}</div>`;
+  const filtered = state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all';
+  const empty = state.inboxLoading ? '<div class="empty-state" role="status">正在加载通知…</div>' : state.inboxError ? '<div class="empty-state">通知加载失败，请刷新重试。</div>' : `<div class="empty-state">${filtered ? '没有符合筛选条件的通知。' : '目前没有通知。'}</div>`;
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>MEMBER INBOX</p><h1>收件箱<span class="heading-period">.</span></h1><p class="page-description">仅显示发送给你的系统通知；成员之间的私聊不在这里。</p></div><div class="inbox-heading-actions"><button class="button button-light" id="refreshInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在刷新…' : '刷新通知'}</button>${state.inboxUnreadCount > 0 ? `<button class="button button-light" id="markAllInboxReadButton" type="button" title="将整个收件箱的未读通知标记为已读" ${state.inboxReadAllPending || state.inboxLoading || state.inboxPendingIds.size || state.usernameRenamePending ? 'disabled' : ''}>${state.inboxReadAllPending ? '正在标记…' : '全部标记已读'}</button>` : ''}</div></section>${inboxFilterMarkup()}${state.inboxActionError ? `<p class="inbox-error" role="alert">${esc(state.inboxActionError)}</p>` : ''}${state.inboxError ? `<p class="inbox-error" role="alert">${esc(state.inboxError)}</p>` : ''}<section class="inbox-list" aria-label="系统通知" aria-busy="${state.inboxLoading}">${items || empty}</section>${state.inboxNextBefore ? `<div class="inbox-more"><button class="button button-light" id="loadMoreInboxButton" type="button" ${state.inboxLoading ? 'disabled' : ''}>${state.inboxLoading ? '正在加载…' : '加载更多'}</button></div>` : ''}</div>`;
 }
-async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { append = false } = {}) {
-  const params = new URLSearchParams({ limit: '20' });
-  if (append && state.inboxNextBefore) params.set('before', String(state.inboxNextBefore));
-  const data = await apiRequest(`/api/inbox?${params.toString()}`);
+function matchesInboxFilters(item) {
+  const isRead = Boolean(item.readAt);
+  const hasTags = Boolean(item.tags?.length);
+  return (state.inboxReadFilter === 'all' || (state.inboxReadFilter === 'read' ? isRead : !isRead))
+    && (state.inboxTagFilter === 'all' || (state.inboxTagFilter === 'tagged' ? hasTags : !hasTags));
+}
+async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { append = false, clear = false } = {}) {
   if (!isCurrentUserSession(epoch, userId)) return false;
-  const received = data.notifications || [];
-  if (append) {
-    const existing = new Set(state.inboxItems.map((item) => String(item.id)));
-    state.inboxItems = [...state.inboxItems, ...received.filter((item) => !existing.has(String(item.id)))];
-  } else state.inboxItems = received;
-  state.inboxUnreadCount = Number(data.unreadCount || 0);
-  state.inboxNextBefore = data.nextBefore || null;
-  return true;
+  const params = new URLSearchParams({ limit: '20', read: state.inboxReadFilter, tag: state.inboxTagFilter });
+  if (append && state.inboxNextBefore) params.set('before', String(state.inboxNextBefore));
+  const attempt = ++inboxLoadAttempt;
+  inboxLoadController?.abort();
+  const controller = new AbortController();
+  inboxLoadController = controller;
+  const isCurrent = () => isCurrentUserSession(epoch, userId) && attempt === inboxLoadAttempt;
+  state.inboxLoading = true; state.inboxError = '';
+  if (clear) { state.inboxItems = []; state.inboxNextBefore = null; }
+  renderRoute();
+  try {
+    const data = await apiRequest(`/api/inbox?${params.toString()}`, { signal: controller.signal });
+    if (!isCurrent()) return false;
+    const received = data.notifications || [];
+    if (append) {
+      const existing = new Set(state.inboxItems.map((item) => String(item.id)));
+      state.inboxItems = [...state.inboxItems, ...received.filter((item) => !existing.has(String(item.id)))];
+    } else state.inboxItems = received;
+    state.inboxUnreadCount = Number(data.unreadCount || 0);
+    state.inboxNextBefore = data.nextBefore || null;
+    return true;
+  } catch (error) {
+    if (isCurrent()) state.inboxError = error.message || '无法加载通知，请刷新重试。';
+    return false;
+  } finally {
+    if (inboxLoadController === controller) inboxLoadController = null;
+    if (isCurrent()) { state.inboxLoading = false; renderRoute(); }
+  }
 }
 async function loadInboxFresh() {
   if (!state.user || state.inboxLoading) return;
   const epoch = state.sessionEpoch; const userId = state.user.id;
-  state.inboxLoading = true; state.inboxError = ''; state.inboxActionError = ''; renderRoute();
+  state.inboxActionError = '';
   const refreshLoadedRules = state.rulesStatus === 'loaded';
-  const [inboxResult, calendarResult, leftoverResult, rulesResult] = await Promise.allSettled([
-    apiRequest('/api/inbox?limit=20'),
+  const [, calendarResult, leftoverResult, rulesResult] = await Promise.allSettled([
+    refreshInbox(epoch, userId),
     apiRequest('/api/calendar/puzzles'),
     apiRequest('/api/calendar/leftovers'),
     ...(refreshLoadedRules ? [apiRequest('/api/rules')] : [])
   ]);
   if (!isCurrentUserSession(epoch, userId)) return;
-  if (inboxResult.status === 'fulfilled') {
-    const inboxData = inboxResult.value;
-    state.inboxItems = inboxData.notifications || [];
-    state.inboxUnreadCount = Number(inboxData.unreadCount || 0);
-    state.inboxNextBefore = inboxData.nextBefore || null;
-  } else state.inboxError = inboxResult.reason?.message || '无法刷新通知。';
   if (calendarResult.status === 'fulfilled') state.calendarPuzzles = (calendarResult.value.puzzles || []).map(normalizePuzzle);
   if (leftoverResult.status === 'fulfilled') state.calendarLeftovers = (leftoverResult.value.puzzles || []).map(normalizePuzzle);
   if (refreshLoadedRules && rulesResult?.status === 'fulfilled') state.rules = rulesResult.value.rules || [];
-  state.inboxLoading = false;
   renderRoute();
 }
-async function markInboxRead(id) {
-  const key = String(id); if (state.inboxPendingIds.has(key)) return;
+async function toggleInboxTag(id, tagId) {
+  const key = String(id);
+  const item = state.inboxItems.find((entry) => String(entry.id) === key);
+  if (!item || state.inboxPendingIds.has(key) || state.inboxLoading || state.inboxReadAllPending || state.usernameRenamePending || !INBOX_TAGS.some((tag) => tag.id === tagId)) return;
   const epoch = state.sessionEpoch; const userId = state.user?.id;
-  state.inboxPendingIds = new Set([...state.inboxPendingIds, key]); state.inboxActionError = ''; renderRoute();
+  const tags = (item.tags || []).includes(tagId) ? item.tags.filter((tag) => tag !== tagId) : [...(item.tags || []), tagId];
+  state.inboxPendingIds.add(key); state.inboxActionError = ''; renderRoute();
   try {
-    await apiRequest(`/api/inbox/${encodeURIComponent(key)}/read`, { method: 'POST', body: '{}' });
+    const data = await apiRequest(`/api/inbox/${encodeURIComponent(key)}/tags`, { method: 'PATCH', body: JSON.stringify({ tags }) });
     if (!isCurrentUserSession(epoch, userId)) return;
-    await refreshInbox(epoch, userId); if (!isCurrentUserSession(epoch, userId)) return;
-    state.inboxPendingIds.delete(key); renderRoute();
+    state.inboxItems = state.inboxItems.map((entry) => String(entry.id) === key ? { ...entry, tags: data.tags } : entry).filter(matchesInboxFilters);
+    await refreshInbox(epoch, userId);
   } catch (error) {
+    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '标签保存失败，请重试。';
+  } finally {
+    if (isCurrentUserSession(epoch, userId)) { state.inboxPendingIds.delete(key); renderRoute(); }
+  }
+}
+async function markInboxRead(id) {
+  const key = String(id);
+  if (state.inboxPendingIds.has(key) || state.inboxReadAllPending || state.inboxLoading || state.usernameRenamePending) return;
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  state.inboxPendingIds.add(key); state.inboxActionError = ''; renderRoute();
+  try {
+    const data = await apiRequest(`/api/inbox/${encodeURIComponent(key)}/read`, { method: 'POST', body: '{}' });
     if (!isCurrentUserSession(epoch, userId)) return;
-    state.inboxPendingIds.delete(key); state.inboxActionError = error.message || '标记已读失败。'; renderRoute();
+    state.inboxUnreadCount = Number(data.unreadCount || 0);
+    state.inboxItems = state.inboxItems.map((item) => String(item.id) === key ? { ...item, readAt: item.readAt || new Date().toISOString() } : item).filter(matchesInboxFilters);
+    await refreshInbox(epoch, userId);
+  } catch (error) {
+    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '标记已读失败。';
+  } finally {
+    if (isCurrentUserSession(epoch, userId)) { state.inboxPendingIds.delete(key); renderRoute(); }
   }
 }
 async function markAllInboxRead() {
-  if (state.inboxReadAllPending) return;
+  if (state.inboxReadAllPending || state.inboxLoading || state.inboxPendingIds.size || state.usernameRenamePending) return;
   const epoch = state.sessionEpoch; const userId = state.user?.id;
   state.inboxReadAllPending = true; state.inboxActionError = ''; renderRoute();
   try {
-    await apiRequest('/api/inbox/read-all', { method: 'POST', body: '{}' });
+    const data = await apiRequest('/api/inbox/read-all', { method: 'POST', body: '{}' });
     if (!isCurrentUserSession(epoch, userId)) return;
-    await refreshInbox(epoch, userId); if (!isCurrentUserSession(epoch, userId)) return;
-    state.inboxReadAllPending = false; renderRoute();
+    state.inboxUnreadCount = Number(data.unreadCount || 0);
+    state.inboxItems = state.inboxItems.map((item) => ({ ...item, readAt: item.readAt || new Date().toISOString() })).filter(matchesInboxFilters);
+    await refreshInbox(epoch, userId);
   } catch (error) {
-    if (!isCurrentUserSession(epoch, userId)) return;
-    state.inboxReadAllPending = false; state.inboxActionError = error.message || '全部标记已读失败。'; renderRoute();
+    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '全部标记已读失败。';
+  } finally {
+    if (isCurrentUserSession(epoch, userId)) { state.inboxReadAllPending = false; renderRoute(); }
   }
 }
 async function loadMoreInbox() {
   if (state.inboxLoading || !state.inboxNextBefore) return;
-  const epoch = state.sessionEpoch; const userId = state.user?.id;
-  state.inboxLoading = true; state.inboxError = ''; renderRoute();
-  try { await refreshInbox(epoch, userId, { append: true }); if (!isCurrentUserSession(epoch, userId)) return; state.inboxLoading = false; renderRoute(); }
-  catch (error) { if (!isCurrentUserSession(epoch, userId)) return; state.inboxLoading = false; state.inboxError = error.message || '无法加载更多通知。'; renderRoute(); }
+  await refreshInbox(state.sessionEpoch, state.user?.id, { append: true });
+}
+function changeInboxFilters(read, tag) {
+  state.inboxReadFilter = read; state.inboxTagFilter = tag; state.inboxActionError = '';
+  void refreshInbox(state.sessionEpoch, state.user?.id, { clear: true });
 }
 function bindMessages() {
   document.querySelector('#refreshInboxButton')?.addEventListener('click', loadInboxFresh);
   document.querySelectorAll('[data-inbox-read]').forEach((button) => button.addEventListener('click', () => markInboxRead(button.dataset.inboxRead)));
+  document.querySelectorAll('[data-inbox-tag]').forEach((button) => button.addEventListener('click', () => toggleInboxTag(button.dataset.inboxId, button.dataset.inboxTag)));
   document.querySelector('#markAllInboxReadButton')?.addEventListener('click', markAllInboxRead);
   document.querySelector('#loadMoreInboxButton')?.addEventListener('click', loadMoreInbox);
+  document.querySelector('#inboxReadFilter')?.addEventListener('change', (event) => changeInboxFilters(event.target.value, state.inboxTagFilter));
+  document.querySelector('#inboxTagFilter')?.addEventListener('change', (event) => changeInboxFilters(state.inboxReadFilter, event.target.value));
+  document.querySelector('#resetInboxFiltersButton')?.addEventListener('click', () => changeInboxFilters('all', 'all'));
 }
 function renderRules() {
   if (state.rulesStatus === 'loading' || state.rulesStatus === 'idle') return '<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span>RULE CATALOG</p><h1>规则目录<span class="heading-period">.</span></h1></div></section><div class="empty-state" role="status">正在加载规则目录…</div></div>';
@@ -1086,26 +1157,35 @@ function openSharedPenpaEditor(puzzle) {
   });
 }
 function openUsernameEditor() {
-  if (!state.user) return;
+  if (!state.user || state.usernameRenamePending) return;
+  if (state.inboxPendingIds.size || state.inboxReadAllPending) { showToast('请等待消息保存完成后再修改用户名。'); return; }
   const expectedUsername=state.user.username;
   openModal(`<p class="modal-eyebrow">MEMBER ACCOUNT</p><h2 id="modalTitle">修改用户名</h2><p class="modal-intro">修改后使用新用户名和原密码登录。账号、题目、评价、完成记录及当前登录会话保持不变。</p><label class="form-field"><span>新用户名</span><input id="newUsername" type="text" maxlength="64" autocomplete="username" autocapitalize="none" spellcheck="false" value="${esc(expectedUsername)}" /></label><p class="form-help">2–32 个字符，可使用字母、数字、下划线和连字符。用户名不区分大小写且不能与其他成员重复。</p><div class="modal-error" id="usernameEditError" role="alert" aria-live="polite"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存用户名','saveUsernameButton')}</div>`);
   const errorNode=document.querySelector('#usernameEditError'); const save=document.querySelector('#saveUsernameButton');
   save.addEventListener('click',async()=>{
-    if (save.disabled) return;
+    if (save.disabled || state.usernameRenamePending) return;
+    if (state.inboxPendingIds.size || state.inboxReadAllPending) { errorNode.textContent='请等待消息保存完成后再修改用户名。'; return; }
     const normalized=normalizeUsername(document.querySelector('#newUsername').value.trim());
     if (!normalized) { errorNode.textContent='用户名需为 2–32 个字符，可使用字母、数字、下划线和连字符。';return; }
     const epoch=state.sessionEpoch; const userId=state.user.id;
-    save.disabled=true;errorNode.textContent='';
+    let renameEpoch=epoch;
+    save.disabled=true;state.usernameRenamePending=true;errorNode.textContent='';renderRoute();
     try {
       const data=await apiRequest('/api/account/username',{method:'PATCH',body:JSON.stringify({username:normalized.username,expectedUsername})});
       if (!isCurrentUserSession(epoch,userId)) return;
       state.sessionEpoch+=1;state.user=data.user;invalidateRules();
+      renameEpoch=state.sessionEpoch;
+      inboxLoadAttempt += 1; inboxLoadController?.abort(); inboxLoadController = null;
+      state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = '';
       if (errorNode.isConnected) closeModal();
       await loadPrivateData();
       showToast('用户名已修改，之后请使用新用户名登录。');
     } catch(error) {
       if (isCurrentUserSession(epoch,userId)&&errorNode.isConnected) errorNode.textContent=error.message;
-    } finally { if (save.isConnected) save.disabled=false; }
+    } finally {
+      if (save.isConnected) save.disabled=false;
+      if (isCurrentUserSession(renameEpoch,userId)) { state.usernameRenamePending=false;renderRoute(); }
+    }
   });
 }
 function openCalendarPuzzleEditor(puzzle) {
@@ -1258,6 +1338,7 @@ function renderRoute() {
   document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号 · 退出</small></span><span class="profile-more">···</span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span><span class="profile-more">···</span>';
   const authButton = document.querySelector('#loginButton');
   document.querySelector('#changeUsernameButton').hidden = !state.user;
+  document.querySelector('#changeUsernameButton').disabled = state.usernameRenamePending;
   authButton.classList.toggle('is-logout', Boolean(state.user));
   authButton.innerHTML = '退出 <span>↗</span>';
   authButton.setAttribute('aria-label', '退出登录');

@@ -10,6 +10,7 @@ import { removeNeutralCalendarReviews } from './calendar-review-migration.mjs';
 import {migrateCalendarScores} from './calendar-score-migration.mjs';
 import {CALENDAR_LIKING_SCORES,normalizeCalendarVote,calendarVoteValue,storedCalendarVote,summarizeCalendarVotes,getCalendarReviewStatus} from './calendar-review-policy.mjs';
 import { getRuleFieldErrors, isRuleItemComplete, RULE_AUDIT_ITEMS, RULE_REQUIRED_APPROVALS } from './rule-policy.mjs';
+import { INBOX_TAG_IDS, normalizeInboxTagInput } from './inbox-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir, 'data');
@@ -267,6 +268,11 @@ database.exec(`
     read_at TEXT
   );
   CREATE INDEX IF NOT EXISTS user_notifications_inbox ON user_notifications(recipient_user_id,read_at,id DESC);
+  CREATE TABLE IF NOT EXISTS user_notification_tags (
+    notification_id INTEGER NOT NULL REFERENCES user_notifications(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL CHECK(tag IN (${INBOX_TAG_IDS.map((tag)=>`'${tag}'`).join(',')})),
+    PRIMARY KEY (notification_id,tag)
+  );
 `);
 
 const evaluationColumns=new Set(database.prepare('PRAGMA table_info(calendar_evaluations)').all().map((column)=>column.name));
@@ -713,19 +719,46 @@ function insertUserNotification(recipientUserId,kind,title,body,entityType,entit
     .run(recipientUserId,kind,title,body,entityType,entityId,dedupeKey).changes>0;
 }
 
-export function getInbox(userId,{limit=30,before=null}={}) {
+export function getInbox(userId,{limit=30,before=null,read='all',tag='all'}={}) {
   const unreadCount=Number(database.prepare('SELECT COUNT(*) AS count FROM user_notifications WHERE recipient_user_id=? AND read_at IS NULL').get(userId).count);
-  const pageSize=limit+1;
-  const rows=before===null
-    ? database.prepare(`SELECT id,kind,title,body,entity_type,entity_id,created_at,read_at FROM user_notifications
-        WHERE recipient_user_id=? ORDER BY id DESC LIMIT ?`).all(userId,pageSize)
-    : database.prepare(`SELECT id,kind,title,body,entity_type,entity_id,created_at,read_at FROM user_notifications
-        WHERE recipient_user_id=? AND id<? ORDER BY id DESC LIMIT ?`).all(userId,before,pageSize);
+  const conditions=['n.recipient_user_id=?'],parameters=[userId];
+  if (before!==null) { conditions.push('n.id<?');parameters.push(before); }
+  if (read==='read') conditions.push('n.read_at IS NOT NULL');
+  if (read==='unread') conditions.push('n.read_at IS NULL');
+  if (tag==='tagged') conditions.push('EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id)');
+  if (tag==='untagged') conditions.push('NOT EXISTS (SELECT 1 FROM user_notification_tags t WHERE t.notification_id=n.id)');
+  const rows=database.prepare(`SELECT n.id,n.kind,n.title,n.body,n.entity_type,n.entity_id,n.created_at,n.read_at
+    FROM user_notifications n WHERE ${conditions.join(' AND ')} ORDER BY n.id DESC LIMIT ?`).all(...parameters,limit+1);
   const hasMore=rows.length>limit,selected=hasMore?rows.slice(0,limit):rows;
+  const tagsById=new Map(selected.map((row)=>[row.id,new Set()]));
+  if (selected.length) {
+    const tags=database.prepare(`SELECT notification_id,tag FROM user_notification_tags
+      WHERE notification_id IN (${selected.map(()=>'?').join(',')})`).all(...selected.map((row)=>row.id));
+    for (const row of tags) tagsById.get(row.notification_id).add(row.tag);
+  }
   const notifications=selected.map((row)=>({id:row.id,type:row.kind,title:row.title,body:row.body,createdAt:row.created_at,readAt:row.read_at,
+    tags:INBOX_TAG_IDS.filter((tag)=>tagsById.get(row.id).has(tag)),
     entity:row.entity_type&&row.entity_id!==null?{type:row.entity_type,id:row.entity_id}:null}));
   const nextBefore=hasMore?selected.at(-1).id:null;
   return {notifications,unreadCount,nextBefore};
+}
+
+export function setInboxNotificationTags(userId,id,tags) {
+  const normalized=normalizeInboxTagInput({tags});
+  if (normalized.error) throw new TypeError(normalized.error);
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    if (!database.prepare('SELECT 1 FROM user_notifications WHERE id=? AND recipient_user_id=?').get(id,userId)) {
+      database.exec('ROLLBACK');return null;
+    }
+    database.prepare('DELETE FROM user_notification_tags WHERE notification_id=?').run(id);
+    const insert=database.prepare('INSERT INTO user_notification_tags(notification_id,tag) VALUES (?,?)');
+    for (const tag of normalized.value.tags) insert.run(id,tag);
+    database.exec('COMMIT');
+    return {id,tags:normalized.value.tags};
+  } catch (error) {
+    database.exec('ROLLBACK');throw error;
+  }
 }
 
 export function markInboxNotificationRead(userId,id) {

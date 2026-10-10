@@ -32,7 +32,7 @@ API 包括：
 - `POST /api/calendar/puzzles/:number/penpa-audits`：对当前 `revision`、`guidelinesRevision` 提交 `approve` / `reject` 和可选建议；重复投票不重复计数
 - `POST /api/rules/:id/error-ignores`、`POST /api/calendar/puzzles/:number/error-ignores`：以当前错误的 `key`、`revision` 提交 `ignored` 和可选 `reason`；错误对应内容改版后旧忽略不适用
 - `GET /api/penpa-guidelines`：读取制图规范正文与规范版本
-- `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读
+- `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读、添加星标／旗帜／书签／喜爱图标标签。使用 `read=all|read|unread` 和 `tag=all|tagged|untagged` 组合筛选，筛选后再分页，未读数量始终统计账号全部通知。`PATCH /api/inbox/:id/tags` 的 `{tags:["star","flag","bookmark","heart"]}` 按集合替换标签，重复 ID 合并，空数组移除所有标签
 - `/api/puzzles`、`/api/folders`、`/api/collections`、`/api/tags`：现有公共题库管理 API，只包含公共题目
 
 共享邀请码可注册多个独立账号。用户名按 Unicode NFKC 规范化并以小写键保证唯一，长度为 2–32 个 Unicode 字符（字母、数字、下划线或连字符）；密码为 8–128 个 Unicode 字符且不超过 512 UTF-8 字节。密码使用带随机盐的 scrypt 哈希存储（N=131072、r=8、p=1），服务不保存明文密码；浏览器只持有 HttpOnly、SameSite=Strict 的会话 Cookie。提交操作校验同源来源。用环境变量 `PUZARCHIVE_DB_PATH`、`PUZARCHIVE_USERS_PATH` 可指定隔离数据库和成员配置路径（也用于测试）。
@@ -67,7 +67,7 @@ npm test
 
 后端测试使用临时 SQLite 数据库，不会读取或写入 `data/puzarchive.sqlite`。
 
-真实桌面浏览器验收使用 [tools/browser-check.mjs](tools/browser-check.mjs)。它在随机 loopback 端口启动真实服务，并创建隔离账号和 SQLite；不读取既有账号或数据库。需要已安装的 Chromium，以及单独的 Playwright 核心测试驱动，应用本身不增加第三方依赖。例如在 Bash 中：
+真实桌面浏览器验收使用 [tools/browser-check.mjs](tools/browser-check.mjs) 和 [tools/inbox-browser-check.mjs](tools/inbox-browser-check.mjs)。它们在随机 loopback 端口启动真实服务，并创建隔离账号和 SQLite；不读取既有账号或数据库。需要已安装的 Chromium，以及单独的 Playwright 核心测试驱动，应用本身不增加第三方依赖。例如在 Bash 中：
 
 ```sh
 npm install --prefix /tmp/puzarchive-browser-test --no-save --package-lock=false playwright-core
@@ -77,7 +77,7 @@ export PUZARCHIVE_BROWSER_SCREENSHOT_DIR=docs/screenshots
 npm run test:browser
 ```
 
-本工作区可用 `bash ../start-puzarchive.sh test:browser` 自动选择本地 Node.js 22 运行时。若 Chromium 需要从独立目录加载系统库，设置 `PUZARCHIVE_BROWSER_LIB_DIR`。受限执行环境需要允许浏览器启动和本机端口监听。测试覆盖注册登录、剧透、留言失败恢复、延迟投票、局部审计、搜索选择、错误忽略、四区流转和日期分配；外部解题平台以隔离测试页面替代，因此不把其加载状态当作验收结果。
+本工作区可用 `bash ../start-puzarchive.sh test:browser` 自动选择本地 Node.js 22 运行时。若 Chromium 需要从独立目录加载系统库，设置 `PUZARCHIVE_BROWSER_LIB_DIR`。受限执行环境需要允许浏览器启动和本机端口监听。测试覆盖注册登录、剧透、留言失败恢复、延迟投票、局部审计、搜索选择、错误忽略、四区流转和日期分配，以及收件箱图标标签保存、组合筛选、分页和延迟响应隔离；外部解题平台以隔离测试页面替代，因此不把其加载状态当作验收结果。
 
 
 ## SQLite 数据

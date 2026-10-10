@@ -10,7 +10,7 @@ import {
   getCalendarPuzzles, getCollection, getCollections, getFolders, getPuzzles, getRule,
   getRules, getTags, registerAccountWithGate, renameAccount, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
   updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
-  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead
+  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead, setInboxNotificationTags
 } from './db.mjs';
 import { getPenpaGuidelines } from './penpa-guidelines.mjs';
 import { normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
@@ -19,6 +19,7 @@ import { RULE_EXAMPLE_URL_MAX_LENGTH, validateRuleExampleUrl } from './rule-poli
 import { hashPassword, verifyPassword } from './password-hash.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 import {CALENDAR_REVIEW_TAGS,CALENDAR_REVIEW_VOTES,CALENDAR_MINIMUM_SCORE_COUNT,normalizeCalendarReviewInput} from './calendar-review-policy.mjs';
+import { INBOX_READ_FILTERS, INBOX_TAG_FILTERS, normalizeInboxTagInput } from './inbox-policy.mjs';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(rootDir,'data');
@@ -26,7 +27,7 @@ const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'truste
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
 const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs','calendar-workflow-policy.mjs']);
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs','calendar-workflow-policy.mjs','inbox-policy.mjs']);
 const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
@@ -262,7 +263,9 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     const rawLimit=url.searchParams.get('limit'),rawBefore=url.searchParams.get('before');
     const limit=rawLimit===null?30:Number(rawLimit),before=rawBefore===null?null:Number(rawBefore);
     if (!Number.isInteger(limit)||limit<1||limit>50||(before!==null&&(!Number.isSafeInteger(before)||before<1))) return sendJson(response,400,{error:'invalid inbox cursor'});
-    return sendJson(response,200,getInbox(user.id,{limit,before}));
+    const read=url.searchParams.get('read')??'all',tag=url.searchParams.get('tag')??'all';
+    if (!INBOX_READ_FILTERS.includes(read)||!INBOX_TAG_FILTERS.includes(tag)) return sendJson(response,400,{error:'invalid inbox filter'});
+    return sendJson(response,200,getInbox(user.id,{limit,before,read,tag}));
   }
   if (request.method==='POST'&&pathname==='/api/inbox/read-all') {
     markAllInboxNotificationsRead(user.id);
@@ -274,6 +277,15 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (!Number.isSafeInteger(id)||id<1) return sendJson(response,404,{error:'notification not found'});
     if (!markInboxNotificationRead(user.id,id)) return sendJson(response,404,{error:'notification not found'});
     return sendJson(response,200,{read:true,...getInbox(user.id,{limit:1})});
+  }
+  const inboxTagsMatch=pathname.match(/^\/api\/inbox\/(\d+)\/tags$/);
+  if (request.method==='PATCH'&&inboxTagsMatch) {
+    const id=Number(inboxTagsMatch[1]);
+    if (!Number.isSafeInteger(id)||id<1) return sendJson(response,404,{error:'notification not found'});
+    const normalized=normalizeInboxTagInput(await readJson(request,4096));
+    if (normalized.error) return sendJson(response,400,{error:normalized.error});
+    const result=setInboxNotificationTags(user.id,id,normalized.value.tags);
+    return result?sendJson(response,200,result):sendJson(response,404,{error:'notification not found'});
   }
   const ruleMatch=pathname.match(/^\/api\/rules\/(\d+)$/);
   if (request.method==='GET' && ruleMatch) { const rule=getRule(Number(ruleMatch[1]),user.id); return rule?sendJson(response,200,{rule}):sendJson(response,404,{error:'rule not found'}); }
