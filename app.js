@@ -245,7 +245,7 @@ function button(text, id = '', className = 'button button-dark') { return `<butt
 
 function getRoute() { const hash = window.location.hash.slice(1) || 'home'; const calendarMatch = hash.match(/^calendar-puzzle-(\d+)$/); const puzzleMatch = hash.match(/^puzzle-(\d+)$/); const collectionMatch = hash.match(/^collection-(\d+)$/); if (calendarMatch) return { name: 'calendar-puzzle', number: Number(calendarMatch[1]) }; if (puzzleMatch) return { name: 'puzzle', number: Number(puzzleMatch[1]) }; if (collectionMatch) return { name: 'collection', id: Number(collectionMatch[1]) }; return { name: hash.split('/')[0] || 'home' }; }
 function normalizeAuthenticatedRoute() { const route = getRoute(); if (!['calendar', 'pending', 'leftovers', 'allocation', 'finished', 'messages', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
-function setBreadcrumb(name) { const labels = { home: '谜题日历', library: '谜题日历', collections: '谜题日历', collection: '谜题日历', files: '谜题日历', records: '谜题日历', authors: '谜题日历', puzzle: '谜题日历', pending: '我的未完成谜题', leftovers: 'leftover 区', allocation: '待分配区', finished: '完成区', messages: '收件箱', calendar: '谜题日历', 'calendar-puzzle': state.calendarReturnRoute === 'pending' ? '我的未完成谜题' : state.calendarReturnRoute === 'leftovers' ? '待重新进入' : '日历谜题', rules: '规则管理' }; const crumb = document.querySelector('#breadcrumbCurrent'); if (crumb) crumb.textContent = labels[name] || '谜题日历'; const activeRoute = name === 'calendar-puzzle' ? (['leftovers','allocation','finished','pending'].includes(state.calendarReturnRoute) ? state.calendarReturnRoute : 'calendar') : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
+function setActiveNavigation(name) { const activeRoute = name === 'calendar-puzzle' ? (['leftovers','allocation','finished','pending'].includes(state.calendarReturnRoute) ? state.calendarReturnRoute : 'calendar') : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
 
 function filteredPuzzles() {
   const filtered = state.puzzles.filter((puzzle) => { if (state.filter === 'completed') return puzzle.completed; if (state.filter === 'wrong') return puzzle.tags.includes('Wrong Puzzle'); if (state.filter === 'logic') return puzzle.type === '逻辑题'; if (state.filter === 'word') return puzzle.type === '文字题'; return true; });
@@ -1781,7 +1781,7 @@ function renderRoute() {
   if (!state.user || state.logoutPending || accountMenuSessionEpoch !== state.sessionEpoch) closeAccountMenu();
   document.body.dataset.authState = !state.sessionChecked ? 'checking' : state.user ? 'authenticated' : 'unauthenticated';
   const route = state.user ? normalizeAuthenticatedRoute() : getRoute();
-  setBreadcrumb(route.name);
+  setActiveNavigation(route.name);
   const profileName = state.user?.username || state.user?.name || '?';
   document.querySelector('#profileButton').innerHTML = state.user ? `<span class="avatar avatar-amber">${esc(profileName.slice(0, 1))}</span><span class="profile-copy"><strong>${esc(profileName)}</strong><small>成员账号</small></span>` : '<span class="avatar avatar-amber">?</span><span class="profile-copy"><strong>未登录</strong><small>需要账号</small></span>';
   const authButton = document.querySelector('#loginButton');
