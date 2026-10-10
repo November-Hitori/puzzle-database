@@ -86,7 +86,7 @@ npm run test:browser
 
 ## 私有服务器部署
 
-服务器部署使用专用系统用户和 Node.js 22.23.3，SQLite 与历史成员配置保存在应用目录之外，并每日创建私有备份。应用仅监听 `127.0.0.1:4173`；临时邀请测试入口通过 Nginx 与短期 IP HTTPS 证书提供。详见 [docs/deployment.md](docs/deployment.md)，包括 SSH 直连配置与关闭临时入口的步骤。代码变更、独立验收和生产发布顺序见[贡献与发布工作流](docs/contribution-workflow.md)。
+服务器部署使用专用系统用户和 Node.js 22.23.3，SQLite 与历史成员配置保存在应用目录之外，并每日创建私有备份。应用仅监听 `127.0.0.1:4173`；临时邀请测试入口通过 Nginx 与短期 IP HTTPS 证书提供。详见 [docs/deployment.md](docs/deployment.md)，包括 SSH 直连配置与关闭临时入口的步骤。可信协作者可直接合并到 `main`；本地测试、发行包预检和独立验收可按需执行。生产发布及自动化保护措施见[贡献与发布工作流](docs/contribution-workflow.md)。
 
 规则表格的安全解析、链接校验、预览与显式导入步骤见[批量导入规则](docs/deployment.md#bulk-rule-import)。原始工作簿和解析出的私有载荷不得提交到 Git。
 
@@ -98,7 +98,7 @@ npm run test:browser
 
 ## CI/CD
 
-生产发布由 `Sigmit64/puzzle-database` 的 GitHub Actions 自动执行：代码通过 PR 提交并经独立 GPT-6 Luna high reviewer 验收（不额外要求 GitHub 人工批准），完整测试、真实桌面浏览器验收和只读发行包预检通过后合并到 `main`，再备份、原子发布及数据保留校验。上游仓库只运行 CI。配置与运行命令见 [docs/ci-cd.md](docs/ci-cd.md)。
+生产发布由 `Sigmit64/puzzle-database` 的 GitHub Actions 自动执行。可信协作者可以直接推送或合并到 `main`，不要求 PR、额外 GitHub 人工批准或本地 reviewer；推送后自动化仍运行测试、真实桌面浏览器验收和只读发行包预检，然后备份、原子发布并验证数据保留与健康状态，失败时回滚代码。上游仓库只运行 CI。配置与运行命令见 [docs/ci-cd.md](docs/ci-cd.md)。
 
 ## 用户名与共同补链接
 
