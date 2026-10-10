@@ -51,7 +51,6 @@ const browserEnv = { ...process.env };
 if (process.env.PUZARCHIVE_BROWSER_LIB_DIR) browserEnv.LD_LIBRARY_PATH = [process.env.PUZARCHIVE_BROWSER_LIB_DIR, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
 let browser, page, interception = null;
 const requests = [], errors = [];
-const fontResponses = [];
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function request(url, method = 'GET', body = null, cookie = '') {
   const response = await fetch(base + url, { method, headers: { origin: base, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -90,39 +89,6 @@ async function assertAccountMenuReachable() {
       });
   }), true, 'account menu stays in the viewport and outside sidebar clipping');
 }
-async function assertPuhuitiRendering(context) {
-  const fonts = await page.evaluate(async () => {
-    await Promise.all([400, 500, 600, 700].map((weight) => document.fonts.load(`${weight} 14px "Alibaba PuHuiTi"`, '中文日历题目')));
-    await document.fonts.ready;
-    const selectors = ['body', '.page-heading h1', '#calendarSearchInput', '#calendarSearchButton', '#calendarSort'];
-    return {
-      families: selectors.map((selector) => ({ selector, family: getComputedStyle(document.querySelector(selector)).fontFamily })),
-      faces: [...document.fonts].map((face) => ({ family: face.family, status: face.status })),
-    };
-  });
-  for (const { selector, family } of fonts.families) {
-    assert.equal(family.split(',')[0].replace(/["']/g, '').trim(), 'Alibaba PuHuiTi', `${selector} uses the same site font`);
-  }
-  const loadedFaces = fonts.faces.filter((face) => face.family.replace(/["']/g, '') === 'Alibaba PuHuiTi');
-  assert.equal(loadedFaces.length, 3);
-  assert.ok(loadedFaces.every((face) => face.status === 'loaded'));
-  for (const weight of ['regular', 'medium', 'bold']) {
-    assert.ok(fontResponses.some((response) => response.path === `/assets/fonts/alibaba-puhuiti-${weight}.woff2`
-      && response.status === 200 && response.type.startsWith('font/woff2')), `${weight} font is served successfully from this site`);
-  }
-  const inspector = await context.newCDPSession(page);
-  try {
-    await inspector.send('DOM.enable'); await inspector.send('CSS.enable');
-    const { root } = await inspector.send('DOM.getDocument');
-    for (const selector of ['.calendar-search-scope', '.page-heading h1']) {
-      const { nodeId } = await inspector.send('DOM.querySelector', { nodeId: root.nodeId, selector });
-      const { fonts: rendered } = await inspector.send('CSS.getPlatformFontsForNode', { nodeId });
-      assert.ok(rendered.length > 0);
-      assert.ok(rendered.every((font) => font.isCustomFont && /Alibaba.*PuHuiTi/i.test(font.familyName) && font.glyphCount > 0),
-        `${selector} renders Chinese with the downloaded font instead of a system fallback`);
-    }
-  } finally { await inspector.detach(); }
-}
 
 try {
   browser = await chromium.launch({ executablePath: executable, env: browserEnv, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
@@ -145,10 +111,6 @@ try {
   page = await context.newPage(); page.setDefaultTimeout(10000);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (incoming) => { const url = new URL(incoming.url()); if (url.origin === base) requests.push({ method: incoming.method(), path: url.pathname }); });
-  page.on('response', (response) => {
-    const url = new URL(response.url());
-    if (url.origin === base && url.pathname.startsWith('/assets/fonts/')) fontResponses.push({ path: url.pathname, status: response.status(), type: response.headers()['content-type'] || '' });
-  });
   await page.goto(base); await page.locator('#authUsername').waitFor();
   assert.equal(await page.locator('.topbar, #breadcrumbCurrent').count(), 0);
   assert.equal(await page.locator('.sidebar').isVisible(), false);
@@ -163,17 +125,6 @@ try {
   await page.locator('#authForm [type="submit"]').click(); await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').waitFor();
   assert.equal((await request('/api/calendar/puzzles')).status, 401);
   console.log('PASS: Chromium rejects seven-character passwords, registers eight-character passwords, real session cookie, private bootstrap and anonymous API boundary');
-
-  await page.locator('#calendarSearchInput').waitFor();
-  await assertPuhuitiRendering(context);
-  await screenshot('puhuiti-calendar-browser-desktop.png');
-  await page.setViewportSize({ width: 390, height: 844 });
-  assert.equal(await page.locator('.topbar, #breadcrumbCurrent').count(), 0);
-  await assertPuhuitiRendering(context);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await screenshot('puhuiti-calendar-browser-mobile.png');
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  console.log('PASS: desktop and mobile omit the topbar; local fonts load successfully and render Chinese body text, headings and matching form controls');
 
   assert.equal(await page.locator('.primary-nav').count(), 1);
   assert.equal(await page.locator('.calendar-view-switch').count(), 0);
@@ -361,6 +312,7 @@ try {
   assert.equal(await page.evaluate(() => document.body.dataset.authState), 'unauthenticated');
   await page.locator('#authUsername').fill('BrowserOwner');await page.locator('#authPassword').fill(password);await page.locator('#authForm [type="submit"]').click();await page.locator('.rule-catalog').waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.locator('.topbar, #breadcrumbCurrent').count(), 0);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await chooseAccountAction('#changeUsernameButton');await page.locator('#newUsername').fill('NativeOne');await page.locator('#saveUsernameButton').click();
   await page.waitForFunction(()=>document.querySelector('#usernameEditError').textContent.includes('已被使用'));

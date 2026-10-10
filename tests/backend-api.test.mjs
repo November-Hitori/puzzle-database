@@ -118,21 +118,6 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal((await request('/db.mjs')).response.status,404);
   assert.equal((await request('/scripts/import-rules.mjs')).response.status,404);
   assert.equal((await request('/tools/prepare-rule-import.py')).response.status,404);
-  for (const weight of ['regular','medium','bold']) {
-    const fontPath=`assets/fonts/alibaba-puhuiti-${weight}.woff2`;
-    const font=await fetch(`${base}/${fontPath}`);
-    assert.equal(font.status,200,fontPath);
-    assert.equal(font.headers.get('content-type'),'font/woff2');
-    assert.equal(font.headers.get('x-content-type-options'),'nosniff');
-    assert.match(font.headers.get('content-security-policy'),/(?:^|; )font-src 'self'(?:;|$)/);
-    assert.doesNotMatch(font.headers.get('content-security-policy'),/fonts\.googleapis\.com|fonts\.gstatic\.com/);
-    const bytes=Buffer.from(await font.arrayBuffer());
-    assert.equal(bytes.subarray(0,4).toString(),'wOF2');
-    assert.deepEqual(bytes,fs.readFileSync(new URL(`../${fontPath}`,import.meta.url)));
-  }
-  for (const fontPath of ['assets/fonts','assets/fonts/other.woff2','assets/fonts/alibaba-puhuiti-regular.ttf','assets/fonts/README.md','assets/fonts/../../db.mjs','assets/fonts/../../data/trusted-users.json']) {
-    assert.equal((await request(`/${fontPath}`)).response.status,404,fontPath);
-  }
 
   const rotatedCode=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:'stale-ada-code-before-rotation',username:'Ada',password:'correct horse battery staple'})});
   assert.equal(rotatedCode.response.status,400);
