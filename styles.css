@@ -325,6 +325,12 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .calendar-date-fields input, .calendar-date-fields select { width: 100%; min-width: 0; min-height: 36px; padding: 7px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--panel); color: var(--ink); font: 12px var(--sans); }
 .form-help { display: block; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .calendar-row-review { color: var(--muted); }
+.calendar-evaluation-section { margin-top: 22px; }
+.calendar-evaluation-section > .record-panel, .calendar-evaluation-section > .calendar-date-panel { margin: 20px 0; padding: 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.calendar-evaluation-section > .record-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.calendar-evaluation-section > .record-panel h3, .calendar-date-panel h3 { margin: 0; font-size: 16px; }
+.calendar-evaluation-section > .record-panel .button { width: auto; }
+.calendar-date-panel .form-field { max-width: 420px; margin-top: 14px; }
 .calendar-review-panel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 20px 0; padding: 15px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 .calendar-review-stat { display: grid; gap: 5px; min-width: 0; }
 .calendar-review-stat > span { color: var(--muted); font-size: 10px; }
@@ -402,6 +408,8 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
   .calendar-date-fields { grid-template-columns: 1fr 1fr; }
   .calendar-date-fields label:first-child { grid-column: 1 / -1; }
   .calendar-review-panel { grid-template-columns: 1fr; }
+  .calendar-evaluation-section > .record-panel { flex-direction: column; align-items: stretch; }
+  .calendar-evaluation-section > .record-panel .button { width: 100%; }
   .calendar-personal-evaluation { grid-column: auto; }
   .vote-participants > .participant-row:not(.participant-veto-row) dd { padding-right: 2px; padding-left: 2px; }
   .vote-participants .participant-name { padding: 2px 4px; font-size: 10px; }

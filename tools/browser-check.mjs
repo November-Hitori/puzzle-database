@@ -135,6 +135,37 @@ async function assertPersonalReviewParticipant(expectedValue) {
   });
   for (let index = 0; index < appearance.own.length; index++) assert.notEqual(appearance.own[index], appearance.other[index], 'the current member has a distinct text, background and border color');
 }
+async function assertCalendarContentOrder({ owned = false } = {}) {
+  const order = await page.locator('.puzzle-page').evaluate((detail) => {
+    const header = detail.querySelector('.puzzle-header');
+    const content = detail.querySelector('.puzzle-content-grid');
+    const solver = detail.querySelector('#puzzleEmbed');
+    const comments = detail.querySelector('.calendar-comments');
+    const evaluations = detail.querySelector('.calendar-evaluation-section');
+    const follows = (first, second) => Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const panels = [...detail.querySelectorAll('.record-panel, .calendar-review-panel, .calendar-workflow-panel')];
+    const dateButton = detail.querySelector('#saveSuggestedDateButton');
+    if (dateButton) panels.push(dateButton.closest('.detail-block'));
+    return {
+      solverFirst: header.nextElementSibling === content,
+      domOrder: follows(solver, comments) && follows(comments, evaluations),
+      visualOrder: comments.getBoundingClientRect().top >= content.getBoundingClientRect().bottom - 1,
+      allEvaluationsBelow: panels.every((panel) => evaluations.contains(panel) && follows(comments, panel) && panel.getBoundingClientRect().top >= comments.getBoundingClientRect().bottom - 1),
+      panels: panels.length,
+      dateControls: Number(Boolean(dateButton)),
+      sidebarControls: content.querySelectorAll('.record-panel, .calendar-review-panel, .calendar-workflow-panel, #saveSuggestedDateButton').length,
+      overflow: document.documentElement.scrollWidth > innerWidth,
+    };
+  });
+  assert.equal(order.solverFirst, true, 'the in-page solver is the first content section after the title');
+  assert.equal(order.domOrder, true, 'reading order places the solver before comments and evaluations');
+  assert.equal(order.visualOrder, true, 'comments appear below the solver and its sidebar');
+  assert.equal(order.allEvaluationsBelow, true, 'every evaluation control appears visually and in DOM order after comments');
+  assert.equal(order.panels, owned ? 4 : 3, 'review, workflow and action panels remain present along with the owner date control');
+  assert.equal(order.dateControls, owned ? 1 : 0);
+  assert.equal(order.sidebarControls, 0, 'the solver sidebar contains only the puzzle information');
+  assert.equal(order.overflow, false, 'the reordered sections fit the viewport');
+}
 async function duplicateDisabledClick(selector) {
   assert.equal(await page.locator(selector).isDisabled(), true);
   const bounds = await page.locator(selector).boundingBox();
@@ -346,6 +377,12 @@ try {
   assert.equal(await page.locator('.calendar-participant-section img').count(), 0);
   assert.equal(await page.evaluate(() => Boolean(window.unsafeParticipant)), false);
   await assertPersonalReviewParticipant(null);
+  await assertCalendarContentOrder();
+  await screenshot('calendar-solver-first-browser-desktop.png');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertCalendarContentOrder();
+  await screenshot('calendar-solver-first-browser-mobile.png');
+  await page.setViewportSize({ width: 1440, height: 1000 });
   assert.equal(await page.locator('#calendarCommentsList').evaluate((node) => node.hidden), true);
   await page.locator('#revealCommentsButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('测试解题思路'));
   assert.equal(await page.evaluate(() => Boolean(document.querySelector('#calendarCommentsList script') || window.unsafeComment)), false);
@@ -364,6 +401,7 @@ try {
   assert.equal(requests.slice(reviewStart).filter((entry) => ['/api/calendar/puzzles', '/api/calendar/leftovers'].includes(entry.path)).length, 0);
   assert.ok((await page.locator('.calendar-participant-section .vote-participants').textContent()).includes('BrowserOwner'));
   await assertPersonalReviewParticipant(2);
+  await assertCalendarContentOrder();
   const participantFrame = await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe'));
   await page.locator('#completePuzzleButton').click();
   await page.locator('label:has(input[name="calendarVote"][value="-2"])').click();
@@ -377,15 +415,18 @@ try {
   const expectedParticipants = { '-2': ['BrowserOwner', '<img src=x onerror="window.unsafeParticipant=true">'], '-1': ['NativeTwo'], '0': ['NativeThree'], '1': [longParticipantName], '2': ['NativeOne'], veto: [] };
   await assertReviewParticipantLayout(expectedParticipants);
   await assertPersonalReviewParticipant(-2);
+  await assertCalendarContentOrder();
   await screenshot('calendar-participants-browser-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
   await assertReviewParticipantLayout(expectedParticipants, { mobile: true });
   await assertPersonalReviewParticipant(-2);
+  await assertCalendarContentOrder();
   await screenshot('calendar-participants-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
   console.log('PASS: native spoiler controls, safe comments, failed-comment draft, delayed vote and preserved iframe');
   console.log('PASS: five horizontal score groups, small accessible vector faces, complete member names, independent veto row and 390px layout');
   console.log('PASS: no separate personal liking or all-round reviewer list, distinct current-member colors and highlight follows changed votes on desktop and mobile');
+  console.log('PASS: solver is first in the page, comments precede every evaluation panel in reading and visual order, and vote updates preserve the desktop and 390px order');
 
   await navigate(`calendar-puzzle-${shared.number}`, '#editSharedPenpaLinksButton');
   assert.equal(await page.locator('#editCalendarPuzzleButton').count(),0);
@@ -435,6 +476,7 @@ try {
   await page.locator('.penpa-guidelines summary').click(); assert.ok((await page.locator('.penpa-guidelines pre').textContent()).includes('Visibility OFF'));
   await page.locator('#savePuzzleButton').click(); await page.waitForFunction(() => document.querySelector('.puzzle-header h1')?.textContent.includes('真实浏览器日历题目'));
   const number = Number(new URL(page.url()).hash.split('-').at(-1)); const puzzleUrl = `/api/calendar/puzzles/${number}`;
+  await assertCalendarContentOrder({ owned: true });
   await page.locator('#completePuzzleButton').click(); await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="0"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#submitCalendarEvaluationButton').waitFor({ state: 'detached' });
   const reviewers = [];
@@ -478,10 +520,12 @@ try {
   await page.locator('#reenterCalendarPuzzleButton').waitFor();
   await assertReviewParticipantLayout({ veto: ['BrowserOwner'] });
   await assertPersonalReviewParticipant('veto');
+  await assertCalendarContentOrder({ owned: true });
   await screenshot('calendar-participants-veto-browser-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
   await assertReviewParticipantLayout({ veto: ['BrowserOwner'] }, { mobile: true });
   await assertPersonalReviewParticipant('veto');
+  await assertCalendarContentOrder({ owned: true });
   await screenshot('calendar-participants-veto-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('#calendarCommentBody').fill('否决后仍可留言'); await page.locator('#sendCalendarCommentButton').click();
@@ -489,6 +533,7 @@ try {
   await page.locator('#reenterCalendarPuzzleButton').click(); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').calendarArea, 'review');
   await assertPersonalReviewParticipant(null);
+  await assertCalendarContentOrder({ owned: true });
   await page.locator('.calendar-review-history > summary').click();
   const historicalSelf = page.locator('.calendar-review-history .participant-row[data-liking-value="veto"] .participant-name-self');
   assert.equal(await historicalSelf.count(), 1, 'the historical veto retains the member identity after reentry');
