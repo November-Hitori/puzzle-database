@@ -18,7 +18,7 @@ from release_archive import MAX_BYTES, validate_archive
 ROOT = pathlib.Path('/var/lib/puzarchive-deploy')
 RELEASE_SCRIPT = '/usr/local/lib/puzarchive-deploy/remote-release.sh'
 IDLE_SECONDS = 120
-RECEIVE_SECONDS = 600
+RECEIVE_SECONDS = 900
 SAFE_RELEASE_LINE = re.compile(
     r'(?:release_already_active|deployed_commit)=[0-9a-f]{40}'
     r'|(?:baseline_tables|baseline_rows|preservation_mismatch_count|foreign_key_violations)=\d+'

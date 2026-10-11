@@ -52,7 +52,7 @@ jobs:
     needs: verify
     if: github.repository == 'Sigmit64/puzzle-database' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment: production
     concurrency:
       group: puzarchive-production
