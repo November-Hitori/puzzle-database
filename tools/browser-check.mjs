@@ -89,6 +89,7 @@ async function assertReviewParticipantLayout(expectedMembers, { mobile = false }
       membersTop: row.querySelector('dd').getBoundingClientRect().top,
       iconCount: label.querySelectorAll('svg').length,
       iconWidth: icon?.width || 0, iconHeight: icon?.height || 0,
+      visibleLabel: [...label.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE || !node.classList?.contains('sr-only')).map((node) => node.textContent).join('').trim(),
     };
   }));
   assert.deepEqual(layout.map((group) => group.value), ['-2', '-1', '0', '1', '2', 'veto']);
@@ -96,6 +97,7 @@ async function assertReviewParticipantLayout(expectedMembers, { mobile = false }
     const label = group.value === 'veto' ? '一票否决' : group.value === '1' ? '+1' : group.value;
     assert.ok(group.label.includes(label), `${group.value} retains a readable score label or accessible name`);
     assert.equal(group.iconCount, ['-2', '0', '2', 'veto'].includes(group.value) ? 1 : 0, `${group.value} uses the requested vector face or numeric label`);
+    if (['-1', '1'].includes(group.value)) assert.equal(group.visibleLabel, '', 'intermediate score labels remain available to screen readers without visible numbers');
     if (group.iconCount) assert.ok(group.iconWidth > 0 && group.iconWidth <= 24 && group.iconHeight > 0 && group.iconHeight <= 24, 'participant faces stay small');
     if (Object.hasOwn(expectedMembers, group.value)) assert.deepEqual(group.names.toSorted(), expectedMembers[group.value].toSorted(), `${group.value} retains all members after layout and viewport changes`);
   }
@@ -108,6 +110,30 @@ async function assertReviewParticipantLayout(expectedMembers, { mobile = false }
   assert.ok(veto.top >= Math.max(...scores.map((group) => group.bottom)) - 1, 'veto remains on its own row below every numeric score');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'participant names and faces stay within the page viewport');
   return layout;
+}
+async function assertPersonalReviewParticipant(expectedValue) {
+  const panel = page.locator('.calendar-review-panel');
+  const content = await panel.textContent();
+  assert.equal(content.includes('你的喜爱程度'), false, 'the personal liking summary is replaced by the highlighted member');
+  assert.equal(content.includes('评分者（全部轮次）'), false, 'the redundant all-round reviewer list is removed');
+  assert.equal(await panel.locator('.rating-participants').count(), 0);
+  const participants = panel.locator(':scope > .calendar-participant-section .vote-participants');
+  const self = participants.locator('.participant-name-self');
+  assert.equal(await self.count(), expectedValue === null ? 0 : 1, 'only the current member is highlighted in the current round');
+  if (expectedValue === null) return;
+  assert.equal(await self.textContent(), 'BrowserOwner');
+  assert.equal(await self.getAttribute('title'), '你');
+  assert.equal(await self.evaluate((member) => member.closest('.participant-row').dataset.likingValue), String(expectedValue), 'the highlighted member follows their current vote');
+  const appearance = await participants.evaluate((list) => {
+    const own = list.querySelector('.participant-name-self');
+    const other = list.querySelector('.participant-name:not(.participant-name-self)');
+    const ownStyle = getComputedStyle(own), otherStyle = getComputedStyle(other);
+    return {
+      own: [ownStyle.color, ownStyle.backgroundColor, ownStyle.borderTopColor],
+      other: [otherStyle.color, otherStyle.backgroundColor, otherStyle.borderTopColor],
+    };
+  });
+  for (let index = 0; index < appearance.own.length; index++) assert.notEqual(appearance.own[index], appearance.other[index], 'the current member has a distinct text, background and border color');
 }
 async function duplicateDisabledClick(selector) {
   assert.equal(await page.locator(selector).isDisabled(), true);
@@ -319,6 +345,7 @@ try {
   assert.ok((await page.locator('.calendar-participant-section').textContent()).includes('<img src=x'));
   assert.equal(await page.locator('.calendar-participant-section img').count(), 0);
   assert.equal(await page.evaluate(() => Boolean(window.unsafeParticipant)), false);
+  await assertPersonalReviewParticipant(null);
   assert.equal(await page.locator('#calendarCommentsList').evaluate((node) => node.hidden), true);
   await page.locator('#revealCommentsButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('测试解题思路'));
   assert.equal(await page.evaluate(() => Boolean(document.querySelector('#calendarCommentsList script') || window.unsafeComment)), false);
@@ -336,6 +363,7 @@ try {
   assert.equal(requests.slice(reviewStart).filter((entry) => entry.path.endsWith('/complete-rating')).length, 1);
   assert.equal(requests.slice(reviewStart).filter((entry) => ['/api/calendar/puzzles', '/api/calendar/leftovers'].includes(entry.path)).length, 0);
   assert.ok((await page.locator('.calendar-participant-section .vote-participants').textContent()).includes('BrowserOwner'));
+  await assertPersonalReviewParticipant(2);
   const participantFrame = await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe'));
   await page.locator('#completePuzzleButton').click();
   await page.locator('label:has(input[name="calendarVote"][value="-2"])').click();
@@ -348,13 +376,16 @@ try {
   assert.equal(await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe')), true);
   const expectedParticipants = { '-2': ['BrowserOwner', '<img src=x onerror="window.unsafeParticipant=true">'], '-1': ['NativeTwo'], '0': ['NativeThree'], '1': [longParticipantName], '2': ['NativeOne'], veto: [] };
   await assertReviewParticipantLayout(expectedParticipants);
+  await assertPersonalReviewParticipant(-2);
   await screenshot('calendar-participants-browser-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
   await assertReviewParticipantLayout(expectedParticipants, { mobile: true });
+  await assertPersonalReviewParticipant(-2);
   await screenshot('calendar-participants-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
   console.log('PASS: native spoiler controls, safe comments, failed-comment draft, delayed vote and preserved iframe');
   console.log('PASS: five horizontal score groups, small accessible vector faces, complete member names, independent veto row and 390px layout');
+  console.log('PASS: no separate personal liking or all-round reviewer list, distinct current-member colors and highlight follows changed votes on desktop and mobile');
 
   await navigate(`calendar-puzzle-${shared.number}`, '#editSharedPenpaLinksButton');
   assert.equal(await page.locator('#editCalendarPuzzleButton').count(),0);
@@ -446,15 +477,26 @@ try {
   await page.locator('label:has(input[name="calendarVote"][value="veto"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#reenterCalendarPuzzleButton').waitFor();
   await assertReviewParticipantLayout({ veto: ['BrowserOwner'] });
+  await assertPersonalReviewParticipant('veto');
   await screenshot('calendar-participants-veto-browser-desktop.png');
   await page.setViewportSize({ width: 390, height: 844 });
   await assertReviewParticipantLayout({ veto: ['BrowserOwner'] }, { mobile: true });
+  await assertPersonalReviewParticipant('veto');
   await screenshot('calendar-participants-veto-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('#calendarCommentBody').fill('否决后仍可留言'); await page.locator('#sendCalendarCommentButton').click();
   await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('否决后仍可留言'));
   await page.locator('#reenterCalendarPuzzleButton').click(); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').calendarArea, 'review');
+  await assertPersonalReviewParticipant(null);
+  await page.locator('.calendar-review-history > summary').click();
+  const historicalSelf = page.locator('.calendar-review-history .participant-row[data-liking-value="veto"] .participant-name-self');
+  assert.equal(await historicalSelf.count(), 1, 'the historical veto retains the member identity after reentry');
+  assert.equal(await historicalSelf.textContent(), 'BrowserOwner');
+  assert.equal(await historicalSelf.getAttribute('title'), '你');
+  assert.equal(await historicalSelf.isVisible(), true);
+  await screenshot('calendar-personal-liking-history-browser-desktop.png');
+  console.log('PASS: a personal veto is highlighted in its own row, a fresh round has no personal highlight, and expanded history retains the personal vote');
   interception = { path: '/api/session', method: 'DELETE', delay: 1200 };
   await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
   assert.equal(await page.locator('#authUsername').isDisabled(), true);

@@ -949,7 +949,7 @@ function puzzleByNumber(number, userId, scope, context=null) {
     const voteHistory=new Map();
     const participantHistory=new Map();
     const scoreParticipantHistory=new Map();
-    for(const item of database.prepare(`SELECT v.review_round,v.vote,v.score,u.name,u.username
+    for(const item of database.prepare(`SELECT v.review_round,v.vote,v.score,v.user_id,u.name,u.username
       FROM calendar_review_votes v LEFT JOIN trusted_users u ON u.id=v.user_id
       WHERE v.puzzle_id=?
       ORDER BY v.review_round,COALESCE(u.name,'未知用户') COLLATE NOCASE,COALESCE(u.username,'') COLLATE NOCASE,v.user_id`).all(row.id)) {
@@ -960,7 +960,7 @@ function puzzleByNumber(number, userId, scope, context=null) {
       }
       const value=calendarVoteValue(item);
       voteHistory.get(item.review_round).push(value);
-      if (value!==null) scoreParticipantHistory.get(item.review_round)[value].push(participantIdentity(item));
+      if (value!==null) scoreParticipantHistory.get(item.review_round)[value].push({...participantIdentity(item),userId:item.user_id});
       const legacyGroup=value==='veto'?'veto':value>0?'support':value<0?'oppose':null;
       if (legacyGroup) participantHistory.get(item.review_round)[legacyGroup].push(participantIdentity(item));
     }

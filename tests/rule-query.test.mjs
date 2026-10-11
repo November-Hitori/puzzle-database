@@ -9,6 +9,7 @@ const people={
   [alice]:{name:'Alice',username:'alice'},[bea]:{name:'Bea',username:'bea'},
   [inactive]:{name:'Inactive',username:'inactive'},[legacy]:{name:'Legacy',username:null},[eve]:{name:'Eve',username:'eve'}
 };
+const scorePeople=Object.fromEntries(Object.entries(people).map(([userId,person])=>[userId,{...person,userId}]));
 const ruleInput=(title,extra={})=>({titleZh:title,titleEn:`${title} English`,rulesZh:['中文说明'],rulesEn:['English description'],
   category:'其它',isVariant:false,baseRuleId:null,exampleUrl:'https://penpa-edit.com/?m=edit&p=fixture',exampleAuthor:'Fixture author',...extra});
 
@@ -184,11 +185,11 @@ test('calendar lists reuse shared rules within a read and refresh rules and part
   assert.deepEqual(a.reviewHistory.map((round)=>round.evaluationCount),[2,1]);
   assert.equal(a.calendarArea,'review');
   assert.equal(a.review.totalScore,2);
-  assert.deepEqual(a.review.scoreParticipants,{'-2':[],'-1':[],'0':[],'1':[],'2':[people[alice]],veto:[]});
-  assert.deepEqual(a.reviewHistory[0].scoreParticipants,{'-2':[],'-1':[],'0':[],'1':[people[alice]],'2':[],veto:[people[bea]]});
+  assert.deepEqual(a.review.scoreParticipants,{'-2':[],'-1':[],'0':[],'1':[],'2':[scorePeople[alice]],veto:[]});
+  assert.deepEqual(a.reviewHistory[0].scoreParticipants,{'-2':[],'-1':[],'0':[],'1':[scorePeople[alice]],'2':[],veto:[scorePeople[bea]]});
   assert.equal(aliceRead.find((puzzle)=>puzzle.number===second.number).completed,false);
   assert.equal(beaRead.find((puzzle)=>puzzle.number===second.number).completed,true);
-  assert.deepEqual(beaRead.find((puzzle)=>puzzle.number===second.number).review.scoreParticipants['-1'],[people[bea]]);
+  assert.deepEqual(beaRead.find((puzzle)=>puzzle.number===second.number).review.scoreParticipants['-1'],[scorePeople[bea]]);
   const puzzleRejection=a.quality.errors.find((error)=>error.key===`rule:${rule.id}:auditRejected:description`);
   assert.equal(api.setQualityErrorIgnored('puzzle',first.number,bea,{key:puzzleRejection.key,revision:puzzleRejection.revision,ignored:true,reason:'Puzzle-specific exception'}).error,undefined);
   const ignoredPuzzle=read('getCalendarPuzzles',alice).find((puzzle)=>puzzle.number===first.number);
@@ -207,9 +208,9 @@ test('calendar lists reuse shared rules within a read and refresh rules and part
   assert.equal(allocated.calendarArea,'allocation');
   assert.equal(allocated.review.scoredCount,3);
   assert.equal(allocated.review.totalScore,1);
-  assert.deepEqual(allocated.review.scoreParticipants['0'],[people[eve]]);
-  assert.deepEqual(allocated.review.scoreParticipants['2'],[people[alice]]);
-  assert.deepEqual(allocated.review.scoreParticipants['-1'],[people[bea]]);
+  assert.deepEqual(allocated.review.scoreParticipants['0'],[scorePeople[eve]]);
+  assert.deepEqual(allocated.review.scoreParticipants['2'],[scorePeople[alice]]);
+  assert.deepEqual(allocated.review.scoreParticipants['-1'],[scorePeople[bea]]);
   review(first.number,alice,'veto',4,2);
   review(second.number,bea,'veto');
   assert.deepEqual(api.getCalendarPuzzles(alice),[]);

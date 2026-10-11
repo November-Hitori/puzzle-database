@@ -325,7 +325,7 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .calendar-date-fields input, .calendar-date-fields select { width: 100%; min-width: 0; min-height: 36px; padding: 7px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--panel); color: var(--ink); font: 12px var(--sans); }
 .form-help { display: block; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .calendar-row-review { color: var(--muted); }
-.calendar-review-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 20px 0; padding: 15px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.calendar-review-panel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 20px 0; padding: 15px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 .calendar-review-stat { display: grid; gap: 5px; min-width: 0; }
 .calendar-review-stat > span { color: var(--muted); font-size: 10px; }
 .calendar-review-stat > strong { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -337,6 +337,7 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .participant-row dt { color: var(--muted); font-size: 10px; line-height: 1.7; }
 .participant-row dd { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; margin: 0; }
 .participant-name { max-width: 100%; padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink-soft); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.participant-name-self { border-color: #93a9b7; background: #e8eff3; color: var(--navy); font-weight: 600; }
 .participant-empty { color: var(--muted); font-size: 11px; line-height: 1.7; }
 .vote-participants { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; }
 .vote-participants > .participant-row { grid-template-columns: minmax(0, 1fr); align-items: start; align-content: start; gap: 0; min-width: 0; }
@@ -346,7 +347,6 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .vote-participants > .participant-veto-row { grid-column: 1 / -1; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .vote-participants > .participant-veto-row dt { min-height: 24px; border: 0; color: var(--accent-deep); }
 .vote-participants > .participant-veto-row dd { justify-content: flex-start; padding: 0; }
-.calendar-participant-section .rating-participants { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .record-panel .rating-participants { margin-top: 15px; }
 .record-panel .participant-row { grid-template-columns: 1fr; gap: 5px; }
 .calendar-review-history > summary { cursor: pointer; color: var(--ink-soft); font-size: 11px; }
