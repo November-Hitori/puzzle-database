@@ -1460,19 +1460,23 @@ function bindPenpaKeyboard() {
     if (event.pointerType === 'mouse') focusSolver(true);
   });
 }
-function positionCalendarReviewAction() {
+function positionCalendarReviewAndComments() {
   const page = document.querySelector('.puzzle-page');
   const evaluations = page?.querySelector('.calendar-evaluation-section');
   const sidebar = page?.querySelector('.puzzle-sidebar');
   const panel = page?.querySelector('.record-panel');
-  if (!evaluations || !sidebar || !panel) return;
+  const comments = page?.querySelector('.calendar-comments');
+  if (!evaluations || !sidebar || !panel || !comments) return;
   const target = calendarReviewMobileLayout.matches ? evaluations : sidebar;
-  if (panel.parentElement === target) return;
-  if (calendarReviewMobileLayout.matches) target.prepend(panel);
-  else target.append(panel);
+  if (panel.parentElement === target && comments.parentElement === target && panel.nextElementSibling === comments) return;
+  const focused = document.activeElement;
+  const restoreFocus = panel.contains(focused) || comments.contains(focused);
+  if (calendarReviewMobileLayout.matches) target.prepend(panel, comments);
+  else target.append(panel, comments);
+  if (restoreFocus) focused.focus({ preventScroll: true });
 }
 function bindPuzzleReviewActions(number, scope, puzzle) {
-  if (scope === 'calendar') positionCalendarReviewAction();
+  if (scope === 'calendar') positionCalendarReviewAndComments();
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number, scope));
   document.querySelector('#reenterCalendarPuzzleButton')?.addEventListener('click', () => puzzle && openCalendarReentry(puzzle));
 }
@@ -2020,6 +2024,6 @@ document.querySelector('.sidebar').addEventListener('scroll', positionAccountMen
 document.querySelector('#inboxButton')?.addEventListener('click', () => { closeAccountMenu(); if (!state.user) return; if (getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
 window.addEventListener('hashchange', () => { closeAccountMenu(); renderRoute(); });
-calendarReviewMobileLayout.addEventListener('change', positionCalendarReviewAction);
+calendarReviewMobileLayout.addEventListener('change', positionCalendarReviewAndComments);
 renderRoute();
 bootstrapDatabase();

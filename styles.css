@@ -431,6 +431,11 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .calendar-comment-list li > div { display: flex; justify-content: space-between; gap: 16px; }
 .calendar-comment-list time { color: var(--ink-soft); font-size: 12px; }
 .calendar-comment-list p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; margin-bottom: 0; }
+.puzzle-sidebar > .calendar-comments { margin-top: 31px; padding: 22px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+.puzzle-sidebar > .calendar-comments h2 { font-size: 16px; }
+.puzzle-sidebar > .calendar-comments .button { width: 100%; }
+.puzzle-sidebar .calendar-comment-list li > div { flex-wrap: wrap; gap: 4px 12px; }
+.puzzle-sidebar .calendar-comment-list strong { min-width: 0; overflow-wrap: anywhere; }
 
 #baseRuleField[hidden] { display: none; }
 .calendar-row { cursor: pointer; }

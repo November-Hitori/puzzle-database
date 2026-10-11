@@ -136,7 +136,7 @@ async function assertPersonalReviewParticipant(expectedValue) {
   for (let index = 0; index < appearance.own.length; index++) assert.notEqual(appearance.own[index], appearance.other[index], 'the current member has a distinct text, background and border color');
 }
 async function assertCalendarContentOrder({ owned = false } = {}) {
-  await page.waitForFunction(() => document.querySelector('.record-panel')?.parentElement.matches(innerWidth <= 780 ? '.calendar-evaluation-section' : '.puzzle-sidebar'));
+  await page.waitForFunction(() => ['.record-panel', '.calendar-comments'].every((selector) => document.querySelector(selector)?.parentElement.matches(innerWidth <= 780 ? '.calendar-evaluation-section' : '.puzzle-sidebar')));
   const order = await page.locator('.puzzle-page').evaluate((detail) => {
     const header = detail.querySelector('.puzzle-header');
     const content = detail.querySelector('.puzzle-content-grid');
@@ -153,43 +153,67 @@ async function assertCalendarContentOrder({ owned = false } = {}) {
     if (dateButton) panels.push(dateButton.closest('.detail-block'));
     return {
       solverFirst: header.nextElementSibling === content,
-      domOrder: follows(solver, comments) && follows(comments, evaluations),
-      visualOrder: comments.getBoundingClientRect().top >= content.getBoundingClientRect().bottom - 1,
+      domOrder: follows(solver, comments) && follows(action, comments) && panels.every((panel) => follows(comments, panel)),
+      commentsPosition: (mobile ? evaluations : sidebar).contains(comments) && comments.getBoundingClientRect().top >= action.getBoundingClientRect().bottom - 1,
       allEvaluationsBelow: panels.every((panel) => evaluations.contains(panel) && follows(comments, panel) && panel.getBoundingClientRect().top >= comments.getBoundingClientRect().bottom - 1),
       actionPosition: mobile
-        ? evaluations.contains(action) && follows(comments, action) && action.getBoundingClientRect().top >= comments.getBoundingClientRect().bottom - 1
+        ? evaluations.contains(action) && follows(content, action) && action.getBoundingClientRect().top >= content.getBoundingClientRect().bottom - 1
         : sidebar.contains(action) && follows(rules, action) && action.getBoundingClientRect().top >= rules.getBoundingClientRect().bottom - 1,
       panels: panels.length,
       dateControls: Number(Boolean(dateButton)),
       recordPanels: detail.querySelectorAll('.record-panel').length,
       actionButtons: detail.querySelectorAll('#completePuzzleButton, #reenterCalendarPuzzleButton').length,
+      commentsPanels: detail.querySelectorAll('.calendar-comments').length,
+      commentIdsUnique: ['calendarCommentsTitle', 'calendarCommentsList', 'calendarCommentForm', 'calendarCommentBody', 'calendarCommentError', 'sendCalendarCommentButton'].every((id) => detail.querySelectorAll(`#${id}`).length === 1),
       sidebarControls: content.querySelectorAll('.calendar-review-panel, .calendar-workflow-panel, #saveSuggestedDateButton').length,
       overflow: document.documentElement.scrollWidth > innerWidth,
     };
   });
   assert.equal(order.solverFirst, true, 'the in-page solver is the first content section after the title');
-  assert.equal(order.domOrder, true, 'reading order places the solver before comments and evaluations');
-  assert.equal(order.visualOrder, true, 'comments appear below the solver and its sidebar');
+  assert.equal(order.domOrder, true, 'reading order places comments after the solver and evaluation action, before the review summary');
+  assert.equal(order.commentsPosition, true, 'comments appear below the action in the desktop sidebar or mobile evaluation section');
   assert.equal(order.allEvaluationsBelow, true, 'review summaries, workflow and date controls remain after comments in visual and reading order');
-  assert.equal(order.actionPosition, true, 'the action appears below rules on desktop and after comments on mobile');
+  assert.equal(order.actionPosition, true, 'the action appears below rules on desktop and after the solver content on mobile');
   assert.equal(order.panels, owned ? 3 : 2, 'review and workflow panels remain present along with the owner date control');
   assert.equal(order.dateControls, owned ? 1 : 0);
   assert.equal(order.recordPanels, 1, 'there is a single evaluation action panel');
   assert.equal(order.actionButtons, 1, 'the complete or reentry button has a unique ID');
+  assert.equal(order.commentsPanels, 1, 'there is a single puzzle comment section');
+  assert.equal(order.commentIdsUnique, true, 'comment controls retain unique IDs');
   assert.equal(order.sidebarControls, 0, 'review summaries, workflow and date controls stay outside the solver sidebar');
   assert.equal(order.overflow, false, 'the reordered sections fit the viewport');
 }
-async function assertResponsiveReviewAction({ owned = false } = {}) {
-  await page.evaluate(() => {
+async function assertResponsiveReviewAction({ owned = false, commentText = null } = {}) {
+  const commentState = await page.evaluate(() => {
     window.responsiveActionPanel = document.querySelector('.record-panel');
     window.responsiveActionIframe = document.querySelector('#puzzleEmbed iframe');
+    window.responsiveComments = document.querySelector('.calendar-comments');
+    window.responsiveCommentForm = document.querySelector('#calendarCommentForm');
+    return {
+      draft: document.querySelector('#calendarCommentBody').value,
+      hidden: document.querySelector('#calendarCommentsList').hidden,
+      focused: document.activeElement === document.querySelector('#calendarCommentBody'),
+    };
   });
   for (const width of [390, 1440, 780, 781, 1440]) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
     await assertCalendarContentOrder({ owned });
     assert.equal(await page.evaluate(() => window.responsiveActionPanel === document.querySelector('.record-panel')), true, 'resizing moves the existing action panel without copying it');
     assert.equal(await page.evaluate(() => window.responsiveActionIframe === document.querySelector('#puzzleEmbed iframe')), true, 'resizing preserves the active solver iframe');
+    assert.equal(await page.evaluate(() => window.responsiveComments === document.querySelector('.calendar-comments')), true, 'resizing moves the existing comments section');
+    assert.equal(await page.evaluate(() => window.responsiveCommentForm === document.querySelector('#calendarCommentForm')), true, 'resizing preserves the existing comment form and its listeners');
+    assert.equal(await page.locator('#calendarCommentBody').inputValue(), commentState.draft, 'comment drafts survive breakpoint changes');
+    assert.equal(await page.locator('#calendarCommentsList').evaluate((list) => list.hidden), commentState.hidden, 'comment reveal state survives breakpoint changes');
+    if (commentState.focused) assert.equal(await page.locator('#calendarCommentBody').evaluate((input) => document.activeElement === input), true, 'moving the comment form preserves focus on the draft');
+    if (commentText) assert.ok((await page.locator('#calendarCommentsList').textContent()).includes(commentText), 'expanded comments remain visible across breakpoint changes');
   }
+}
+async function clickReviewAction(selector = '#completePuzzleButton') {
+  const control = page.locator(selector);
+  // Finish scrolling before the physical click so a resized page cannot send
+  // the pointer into the solver iframe at the button's previous coordinates.
+  await control.scrollIntoViewIfNeeded();
+  await control.click();
 }
 async function duplicateDisabledClick(selector) {
   assert.equal(await page.locator(selector).isDisabled(), true);
@@ -412,12 +436,19 @@ try {
   assert.equal(await page.locator('#calendarCommentsList').evaluate((node) => node.hidden), true);
   await page.locator('#revealCommentsButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('测试解题思路'));
   assert.equal(await page.evaluate(() => Boolean(document.querySelector('#calendarCommentsList script') || window.unsafeComment)), false);
+  await page.locator('#calendarCommentBody').fill('跨窗口保留的留言草稿');
+  await assertResponsiveReviewAction({ commentText: '测试解题思路' });
+  await screenshot('calendar-sidebar-comments-browser-desktop.png');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertCalendarContentOrder();
+  await screenshot('calendar-sidebar-comments-browser-mobile.png');
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('#calendarCommentBody').fill('真实浏览器留言'); interception = { path: `/api/calendar/puzzles/${spoiler.number}/comments`, fail: true };
   await page.locator('#sendCalendarCommentButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentError').textContent.includes('native simulated outage'));
   assert.equal(await page.locator('#calendarCommentBody').inputValue(), '真实浏览器留言');
   await page.locator('#sendCalendarCommentButton').click(); await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('真实浏览器留言'));
   await page.evaluate(() => { window.testIframe = document.querySelector('#puzzleEmbed iframe'); });
-  await page.locator('#completePuzzleButton').click(); assert.equal(await page.locator('input[name="calendarVote"]').count(), 6);
+  await clickReviewAction(); assert.equal(await page.locator('input[name="calendarVote"]').count(), 6);
   await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="2"])').click();
   const reviewStart = requests.length; interception = { path: `/api/calendar/puzzles/${spoiler.number}/complete-rating`, delay: 700 };
   await page.locator('#submitCalendarEvaluationButton').click(); await duplicateDisabledClick('#submitCalendarEvaluationButton');
@@ -431,7 +462,7 @@ try {
   const participantFrame = await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe'));
   await page.setViewportSize({ width: 390, height: 844 });
   await assertCalendarContentOrder();
-  await page.locator('#completePuzzleButton').click();
+  await clickReviewAction();
   await page.locator('label:has(input[name="calendarVote"][value="-2"])').click();
   await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#submitCalendarEvaluationButton').waitFor({state: 'detached'});
@@ -456,7 +487,7 @@ try {
   console.log('PASS: native spoiler controls, safe comments, failed-comment draft, delayed vote and preserved iframe');
   console.log('PASS: five horizontal score groups, small accessible vector faces, complete member names, independent veto row and 390px layout');
   console.log('PASS: no separate personal liking or all-round reviewer list, distinct current-member colors and highlight follows changed votes on desktop and mobile');
-  console.log('PASS: solver comes first, desktop evaluation action follows sidebar rules, mobile action follows comments, and 1440/390/780/781px transitions preserve a single action panel and solver iframe');
+  console.log('PASS: desktop comments follow the action below sidebar rules; mobile action and comments precede review panels; 1440/390/780/781px transitions preserve unique controls, comments/form/action nodes, expanded comments, drafts and the solver iframe');
 
   await navigate(`calendar-puzzle-${shared.number}`, '#editSharedPenpaLinksButton');
   assert.equal(await page.locator('#editCalendarPuzzleButton').count(),0);
@@ -507,7 +538,7 @@ try {
   await page.locator('#savePuzzleButton').click(); await page.waitForFunction(() => document.querySelector('.puzzle-header h1')?.textContent.includes('真实浏览器日历题目'));
   const number = Number(new URL(page.url()).hash.split('-').at(-1)); const puzzleUrl = `/api/calendar/puzzles/${number}`;
   await assertCalendarContentOrder({ owned: true });
-  await page.locator('#completePuzzleButton').click(); await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="0"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
+  await clickReviewAction(); await page.locator('label:has(input[name="calendarDifficulty"][value="3"])').click(); await page.locator('label:has(input[name="calendarVote"][value="0"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#submitCalendarEvaluationButton').waitFor({ state: 'detached' });
   const reviewers = [];
   for (const username of ['NativeOne', 'NativeTwo']) {
@@ -517,7 +548,7 @@ try {
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').review.totalScore, 4);
   await navigate(`calendar-puzzle-${number}`, '.calendar-workflow-panel');
   assert.ok((await page.locator('.calendar-workflow-panel header').textContent()).includes('待分配区'));
-  await page.locator('#completePuzzleButton').click();
+  await clickReviewAction();
   for (const score of [-2,-1,0,1,2]) assert.equal(await page.locator(`input[name="calendarVote"][value="${score}"]`).count(),1);
   assert.equal(await page.locator('input[name="calendarVote"][value="0"]').isChecked(),true);
   await page.locator('#modalBackdrop .modal-cancel').click();
@@ -549,7 +580,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await assertCalendarContentOrder({ owned: true });
   await page.evaluate(() => { window.vetoActionIframe = document.querySelector('#puzzleEmbed iframe'); });
-  await page.locator('#completePuzzleButton').click();
+  await clickReviewAction();
   await page.locator('label:has(input[name="calendarVote"][value="veto"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
   await page.locator('#reenterCalendarPuzzleButton').waitFor();
   assert.equal(await page.evaluate(() => window.vetoActionIframe === document.querySelector('#puzzleEmbed iframe')), true, 'submitting a mobile veto preserves the solver iframe');
@@ -567,7 +598,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('#calendarCommentBody').fill('否决后仍可留言'); await page.locator('#sendCalendarCommentButton').click();
   await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('否决后仍可留言'));
-  await page.locator('#reenterCalendarPuzzleButton').click(); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
+  await clickReviewAction('#reenterCalendarPuzzleButton'); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').calendarArea, 'review');
   assert.equal(await page.evaluate(() => window.vetoActionIframe === document.querySelector('#puzzleEmbed iframe')), true, 'desktop reentry preserves the solver iframe after responsive action moves');
   await assertPersonalReviewParticipant(null);
