@@ -76,6 +76,7 @@ const modalContent = document.querySelector('#modalContent');
 const toastElement = document.querySelector('#toast');
 const accountMenu = document.querySelector('#accountMenu');
 const accountMenuButton = document.querySelector('#accountMenuButton');
+const calendarReviewMobileLayout = window.matchMedia('(max-width: 780px)');
 let toastTimer;
 let accountMenuSessionEpoch = -1;
 const API_REQUEST_TIMEOUT_MS = 20000;
@@ -1459,7 +1460,19 @@ function bindPenpaKeyboard() {
     if (event.pointerType === 'mouse') focusSolver(true);
   });
 }
+function positionCalendarReviewAction() {
+  const page = document.querySelector('.puzzle-page');
+  const evaluations = page?.querySelector('.calendar-evaluation-section');
+  const sidebar = page?.querySelector('.puzzle-sidebar');
+  const panel = page?.querySelector('.record-panel');
+  if (!evaluations || !sidebar || !panel) return;
+  const target = calendarReviewMobileLayout.matches ? evaluations : sidebar;
+  if (panel.parentElement === target) return;
+  if (calendarReviewMobileLayout.matches) target.prepend(panel);
+  else target.append(panel);
+}
 function bindPuzzleReviewActions(number, scope, puzzle) {
+  if (scope === 'calendar') positionCalendarReviewAction();
   document.querySelector('#completePuzzleButton')?.addEventListener('click', () => openRating(number, scope));
   document.querySelector('#reenterCalendarPuzzleButton')?.addEventListener('click', () => puzzle && openCalendarReentry(puzzle));
 }
@@ -2007,5 +2020,6 @@ document.querySelector('.sidebar').addEventListener('scroll', positionAccountMen
 document.querySelector('#inboxButton')?.addEventListener('click', () => { closeAccountMenu(); if (!state.user) return; if (getRoute().name === 'messages') void loadInboxFresh(); else window.location.hash = '#messages'; });
 modalBackdrop.addEventListener('click', (event) => { if (event.target === modalBackdrop || event.target.closest('.modal-close') || event.target.closest('.modal-cancel')) closeModal(); });
 window.addEventListener('hashchange', () => { closeAccountMenu(); renderRoute(); });
+calendarReviewMobileLayout.addEventListener('change', positionCalendarReviewAction);
 renderRoute();
 bootstrapDatabase();
