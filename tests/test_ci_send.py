@@ -51,19 +51,56 @@ if mode == 'safe-errors':
 if mode == 'early-close':
     os.close(0)
     sys.exit(23)
-if mode == 'hold-input':
-    print('fixture_transport_ready=true', flush=True)
-    signal.pause()
-elif mode == 'hold-controls':
-    print('fixture_transport_ready=true', flush=True)
+header = sys.stdin.buffer.readline()
+(root / 'header.bin').write_bytes(header)
+request = json.loads(header)
+refs = request['font_cache']['fonts']
+if mode in ('handshake-stall', 'handshake-controls'):
+    while True:
+        if mode == 'handshake-controls':
+            sys.stderr.write('debug3: receive packet: type 82\\n')
+            sys.stderr.write('debug2: channel 0: rcvd adjust 131072\\n')
+            sys.stderr.flush()
+        time.sleep(0.05)
+if mode == 'handshake-eof':
+    sys.exit(0)
+reuse = list(range(len(refs))) if mode == 'cache-all' else ([0] if mode == 'cache-some' else [])
+if mode == 'unsafe-stdout':
+    print('SENSITIVE_REMOTE_CONFIGURATION=/private/member.json', flush=True)
+    print('SENSITIVE_OVERSIZED_CONTENT' * 500, flush=True)
+    print('font_cache_reused_files=2 SENSITIVE_INLINE_CONTENT', flush=True)
+reply = os.environ.get('CI_SEND_FIXTURE_REPLY', json.dumps({'reuse': reuse}))
+print('deployment_gateway_font_cache=' + reply, flush=True)
+if mode == 'duplicate-reply':
+    print('deployment_gateway_font_cache=' + reply, flush=True)
+if mode in ('hold-input', 'hold-controls'):
+    print('deployment_gateway_receiving=true', flush=True)
+    if mode == 'hold-input':
+        signal.pause()
     while True:
         sys.stderr.write('debug3: receive packet: type 82\\n')
         sys.stderr.write('debug2: channel 0: rcvd adjust 131072\\n')
         sys.stderr.flush()
         time.sleep(0.05)
 else:
-    (root / 'received.bin').write_bytes(sys.stdin.buffer.read())
-    print('fixture_eof_seen=true', flush=True)
+    wire = sys.stdin.buffer.read()
+    (root / 'wire.bin').write_bytes(wire)
+    original = (root / 'release.tar').read_bytes()
+    rebuilt, cursor, position = bytearray(), 0, 0
+    for index in reuse:
+        ref = refs[index]
+        gap = ref['offset'] - position
+        rebuilt.extend(wire[cursor:cursor + gap])
+        cursor += gap
+        rebuilt.extend(original[ref['offset']:ref['offset'] + ref['bytes']])
+        position = ref['offset'] + ref['bytes']
+    rebuilt.extend(wire[cursor:])
+    (root / 'received.bin').write_bytes(header + rebuilt)
+    print('deployment_gateway_received=true', flush=True)
+    if mode == 'unsafe-stdout':
+        print('font_cache_reused_files=0', flush=True)
+        print('service_active=true', flush=True)
+        print('unauthenticated_private_api_http=401', flush=True)
     if mode == 'quiet-after-eof':
         time.sleep(1.25)
     sys.exit(23 if mode == 'reject' else 0)
@@ -83,10 +120,15 @@ class CiSendTests(unittest.TestCase):
         self.environment = {**os.environ, 'PATH': str(self.root) + os.pathsep + os.environ['PATH'],
                             'CI_SEND_FIXTURE': str(self.root)}
 
-    def archive(self, corrupt=False):
+    def archive(self, corrupt=False, fonts=False, invalid_font=False):
         archive = self.root / 'release.tar'
         sources = {'server.mjs': b'fixture server', 'db.mjs': b'fixture database',
                    'docs/penpa.md': b'fixture guidelines', 'fixture.bin': bytes(range(256)) * 4096}
+        if fonts:
+            sources['assets/fonts/regular.woff2'] = b'wOF2' + bytes(range(255)) * 317
+            sources['assets/fonts/bold.woff2'] = b'wOF2' + bytes(range(254)) * 751
+        if invalid_font:
+            sources['assets/fonts/invalid.woff2'] = b'not a web font'
         hashes = {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}
         if corrupt:
             sources['server.mjs'] += b' changed after manifest'
@@ -103,12 +145,15 @@ class CiSendTests(unittest.TestCase):
             tar.addfile(data)
         return archive
 
-    def send(self, archive, mode='receive', idle_seconds=None):
+    def send(self, archive, mode='receive', idle_seconds=None, reply=None):
         command = [sys.executable, str(SENDER), str(archive), str(self.config)]
         if idle_seconds is not None:
             command.append(str(idle_seconds))
+        environment = {**self.environment, 'CI_SEND_FIXTURE_MODE': mode}
+        if reply is not None:
+            environment['CI_SEND_FIXTURE_REPLY'] = reply
         return subprocess.run(command,
-                              env={**self.environment, 'CI_SEND_FIXTURE_MODE': mode},
+                              env=environment,
                               capture_output=True, timeout=10)
 
     def assert_transport_stopped(self):
@@ -123,7 +168,8 @@ class CiSendTests(unittest.TestCase):
         header, separator, payload = (self.root / 'received.bin').read_bytes().partition(b'\n')
         self.assertEqual(separator, b'\n')
         self.assertEqual(payload, archive.read_bytes())
-        self.assertEqual(json.loads(header), {'commit': COMMIT, 'sha256': hashlib.sha256(payload).hexdigest()})
+        self.assertEqual(json.loads(header), {'commit': COMMIT, 'sha256': hashlib.sha256(payload).hexdigest(),
+                                             'font_cache': {'version': 1, 'archive_bytes': len(payload), 'fonts': []}})
         received = self.root / 'received.tar'
         received.write_bytes(payload)
         verified = subprocess.run([sys.executable, str(VERIFIER), 'verify', str(received), COMMIT],
@@ -133,7 +179,9 @@ class CiSendTests(unittest.TestCase):
         self.assertEqual(args, ['-C', '-vvv', '-o', 'ServerAliveInterval=15',
                                 '-o', 'ServerAliveCountMax=3', '-F', str(self.config), 'puzarchive-production'])
         self.assertIn(b'release_payload_bytes=' + str(len(payload)).encode(), result.stdout)
-        self.assertIn(b'fixture_eof_seen=true', result.stdout)
+        self.assertIn(b'deployment_gateway_received=true', result.stdout)
+        self.assertIn(b'release_font_cache_reused=0', result.stdout)
+        self.assertIn(b'release_wire_payload_bytes=' + str(len(payload)).encode(), result.stdout)
         self.assertIn(b'local_stdin_closed=true', result.stdout)
         self.assertIn(b'ssh_exit_code=0', result.stdout)
         progress = [int(line.split(b'=', 1)[1]) for line in result.stdout.splitlines()
@@ -152,10 +200,126 @@ class CiSendTests(unittest.TestCase):
         self.assertNotIn(b'release_transfer_started=true', result.stdout)
         self.assertNotIn(b'local_stdin_closed=true', result.stdout)
 
+    def test_font_hits_omit_only_content_and_reconstruct_the_original_verified_archive(self):
+        for mode, indices in (('cache-all', [0, 1]), ('cache-some', [0]), ('receive', [])):
+            with self.subTest(mode=mode):
+                archive = self.archive(fonts=True)
+                original = archive.read_bytes()
+                original_hash = hashlib.sha256(original).hexdigest()
+                result = self.send(archive, mode)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                header, _, rebuilt = (self.root / 'received.bin').read_bytes().partition(b'\n')
+                request = json.loads(header)
+                self.assertEqual(request['sha256'], original_hash)
+                self.assertEqual(request['font_cache']['archive_bytes'], len(original))
+                self.assertEqual(rebuilt, original)
+                self.assertEqual(archive.read_bytes(), original)
+                refs = request['font_cache']['fonts']
+                with tarfile.open(archive, 'r:') as tar:
+                    members = [member for member in tar.getmembers()
+                               if member.name.startswith('assets/fonts/') and member.name.endswith('.woff2')]
+                    self.assertEqual(refs, [{'offset': member.offset_data, 'bytes': member.size,
+                                            'sha256': hashlib.sha256(tar.extractfile(member).read()).hexdigest()}
+                                           for member in members])
+                expected, cursor = bytearray(), 0
+                for index in indices:
+                    ref = refs[index]
+                    expected.extend(original[cursor:ref['offset']])
+                    cursor = ref['offset'] + ref['bytes']
+                expected.extend(original[cursor:])
+                wire = (self.root / 'wire.bin').read_bytes()
+                self.assertEqual(wire, bytes(expected))
+                removed_bytes = sum(refs[index]['bytes'] for index in indices)
+                self.assertEqual(len(wire), len(original) - removed_bytes)
+                self.assertIn(b'release_font_cache_candidates=2', result.stdout)
+                self.assertIn(b'release_font_cache_reused=' + str(len(indices)).encode(), result.stdout)
+                self.assertIn(b'release_font_cache_reused_bytes=' + str(removed_bytes).encode(), result.stdout)
+                self.assertIn(b'release_wire_payload_bytes=' + str(len(wire)).encode(), result.stdout)
+                progress = [int(line.split(b'=', 1)[1]) for line in result.stdout.splitlines()
+                            if line.startswith(b'local_payload_bytes_written=')]
+                self.assertEqual(progress, sorted(progress))
+                self.assertEqual(progress[-1], len(wire))
+                received = self.root / 'received.tar'
+                received.write_bytes(rebuilt)
+                verified = subprocess.run([sys.executable, str(VERIFIER), 'verify', str(received), COMMIT],
+                                          capture_output=True, timeout=10)
+                self.assertEqual(verified.returncode, 0, verified.stderr.decode())
+                self.assertNotIn(b'deployment_gateway_font_cache=', result.stdout + result.stderr)
+                self.assert_transport_stopped()
+
+    def test_non_woff2_font_never_starts_the_transport(self):
+        result = self.send(self.archive(invalid_font=True))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'transport.json').exists())
+        self.assertNotIn(b'release_transfer_started=true', result.stdout)
+
+    def test_invalid_cache_replies_fail_before_sending_source_content(self):
+        replies = ('null', '[]', '{}', '{"reuse":null}', '{"reuse":{}}',
+                   '{"reuse":[true]}', '{"reuse":[-1]}', '{"reuse":[2]}',
+                   '{"reuse":[0,0]}', '{"reuse":[1,0]}', '{"reuse":[0.0]}',
+                   '{"reuse":[NaN]}', '{"reuse":[],"unknown":"SENSITIVE_REPLY"}',
+                   '{"reuse":[],"reuse":[0]}', 'SENSITIVE_INVALID_REPLY',
+                   '{"reuse":[' + ' ' * 5000 + ']}')
+        for reply in replies:
+            with self.subTest(reply=reply[:60]):
+                result = self.send(self.archive(fonts=True), reply=reply)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'release_font_cache_handshake_failed=true', result.stdout)
+                self.assertNotIn(b'local_stdin_closed=true', result.stdout)
+                self.assertNotIn(b'SENSITIVE_', result.stdout + result.stderr)
+                self.assertNotIn(b'release_wire_payload_bytes=', result.stdout)
+                if (self.root / 'wire.bin').exists():
+                    self.assertEqual((self.root / 'wire.bin').read_bytes(), b'')
+                self.assert_transport_stopped()
+
+    def test_duplicate_cache_reply_is_rejected(self):
+        result = self.send(self.archive(fonts=True), 'duplicate-reply')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b'local_stdin_closed=true', result.stdout)
+        self.assertNotIn(b'deployment_gateway_font_cache=', result.stdout + result.stderr)
+        self.assert_transport_stopped()
+
+    def test_cache_handshake_stall_is_bounded_even_with_ssh_control_replies(self):
+        for mode in ('handshake-stall', 'handshake-controls'):
+            with self.subTest(mode=mode):
+                started = time.monotonic()
+                result = self.send(self.archive(fonts=True), mode, idle_seconds=0.4)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertIn(b'release_font_cache_handshake_timeout=true', result.stdout)
+                self.assertNotIn(b'release_transfer_idle_timeout=true', result.stdout)
+                self.assertNotIn(b'local_stdin_closed=true', result.stdout)
+                self.assertNotIn(b'release_wire_payload_bytes=', result.stdout)
+                self.assertEqual(json.loads((self.root / 'header.bin').read_bytes())['font_cache']['version'], 1)
+                if mode == 'handshake-controls':
+                    self.assertIn(b'ssh_control_reply_count=3', result.stdout)
+                self.assert_transport_stopped()
+
+    def test_eof_before_cache_reply_fails_instead_of_uploading_to_an_unsupported_gateway(self):
+        result = self.send(self.archive(fonts=True), 'handshake-eof')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'release_font_cache_handshake_failed=true', result.stdout)
+        self.assertNotIn(b'local_stdin_closed=true', result.stdout)
+        self.assertNotIn(b'release_wire_payload_bytes=', result.stdout)
+        self.assertNotIn(b'release_transfer_idle_timeout=true', result.stdout)
+        self.assertFalse((self.root / 'wire.bin').exists())
+        self.assert_transport_stopped()
+
+    def test_remote_stdout_reports_only_recognized_safe_milestones(self):
+        result = self.send(self.archive(fonts=True), 'unsafe-stdout')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        for marker in (b'font_cache_reused_files=0', b'service_active=true',
+                       b'unauthenticated_private_api_http=401', b'deployment_gateway_received=true'):
+            self.assertIn(marker, result.stdout)
+        for secret in (b'SENSITIVE_', b'/private/', b'member.json', b'deployment_gateway_font_cache='):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertIn(b'local_stdin_closed=true', result.stdout)
+        self.assert_transport_stopped()
+
     def test_remote_nonzero_status_stays_a_failure_after_eof(self):
         result = self.send(self.archive(), 'reject')
         self.assertEqual(result.returncode, 23)
-        self.assertIn(b'fixture_eof_seen=true', result.stdout)
+        self.assertIn(b'deployment_gateway_received=true', result.stdout)
         self.assertIn(b'local_stdin_closed=true', result.stdout)
         self.assertIn(b'ssh_exit_code=23', result.stdout)
         self.assertNotIn(b'success=true', result.stdout + result.stderr)
@@ -234,7 +398,7 @@ class CiSendTests(unittest.TestCase):
     def test_quiet_remote_execution_after_eof_does_not_use_the_upload_idle_deadline(self):
         result = self.send(self.archive(), 'quiet-after-eof', idle_seconds=1)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertIn(b'fixture_eof_seen=true', result.stdout)
+        self.assertIn(b'deployment_gateway_received=true', result.stdout)
         self.assertIn(b'local_stdin_closed=true', result.stdout)
         self.assertNotIn(b'release_transfer_idle_timeout=true', result.stdout)
         self.assert_transport_stopped()
@@ -248,7 +412,7 @@ class CiSendTests(unittest.TestCase):
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             deadline = time.monotonic() + 10
-            while b'fixture_transport_ready=true\n' not in prefix:
+            while b'deployment_gateway_receiving=true\n' not in prefix:
                 self.assertTrue(selector.select(max(0, deadline - time.monotonic())), 'transport did not become ready')
                 chunk = os.read(process.stdout.fileno(), 4096)
                 self.assertTrue(chunk, 'sender exited before transport was ready')

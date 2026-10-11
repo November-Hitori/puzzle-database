@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import io
 import json
+import copy
 import os
 from pathlib import Path
 import selectors
@@ -17,11 +18,15 @@ import unittest
 
 GATEWAY = Path(__file__).parents[1] / 'deploy' / 'ci-gateway.py'
 COMMIT = 'b' * 40
-WRAPPER = '''import importlib.util, pathlib, sys
+WRAPPER = '''import importlib.util, os, pathlib, sys, time
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
 spec = importlib.util.spec_from_file_location('fixture_gateway', sys.argv[1])
 gateway = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gateway)
+gateway.CACHE_UID = os.getuid()
+gateway.CACHE_GID = os.getgid()
+if len(sys.argv) > 6 and sys.argv[6] == 'wrong-cache-owner':
+    gateway.CACHE_UID += 1
 gateway.os.getuid = lambda: 0
 if len(sys.argv) > 6 and sys.argv[6] == 'forward-fail':
     original = gateway.Forwarder.consume
@@ -29,6 +34,14 @@ if len(sys.argv) > 6 and sys.argv[6] == 'forward-fail':
         original(self, block)
         raise OSError('SENSITIVE_FIXTURE_ERROR')
     gateway.Forwarder.consume = failed_forward
+if len(sys.argv) > 6 and sys.argv[6] == 'slow-cache':
+    original_read = gateway.FontCache.read
+    def slow_read(self, digest, size, check_progress):
+        body = original_read(self, digest, size, check_progress)
+        time.sleep(0.25)
+        check_progress()
+        return body
+    gateway.FontCache.read = slow_read
 sys.exit(gateway.entrypoint(root=sys.argv[2], release_script=sys.argv[3],
                            idle_seconds=float(sys.argv[4]), receive_seconds=float(sys.argv[5])))
 '''
@@ -121,9 +134,10 @@ class CiGatewayTests(unittest.TestCase):
             except ChildProcessError:
                 pass
 
-    def archive(self, corrupt=False):
+    def archive(self, corrupt=False, fonts=None):
         sources = {'server.mjs': b'fixture server', 'db.mjs': b'fixture database',
                    'docs/penpa.md': b'fixture spec', 'binary.dat': bytes(range(256)) * 128}
+        sources.update(fonts or {})
         hashes = {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}
         if corrupt:
             sources['db.mjs'] += b' changed after manifest'
@@ -145,6 +159,56 @@ class CiGatewayTests(unittest.TestCase):
         payload = self.archive() if payload is None else payload
         header = json.dumps({'commit': COMMIT, 'sha256': hashlib.sha256(payload).hexdigest()}).encode()
         return header + b'\n' + payload
+
+    def font_archive(self, changed=False):
+        return self.archive(fonts={
+            'assets/fonts/example-regular.woff2': b'wOF2' + bytes(range(256)) * 300,
+            'assets/fonts/example-bold.woff2': b'wOF2' + (b'new' if changed else b'old') * 17003,
+        })
+
+    def cached_request(self, payload):
+        refs = []
+        with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as archive:
+            for member in archive.getmembers():
+                if member.name.startswith('assets/fonts/') and member.name.endswith('.woff2'):
+                    body = archive.extractfile(member).read()
+                    refs.append({'offset': member.offset_data, 'bytes': member.size,
+                                 'sha256': hashlib.sha256(body).hexdigest()})
+        return {'commit': COMMIT, 'sha256': hashlib.sha256(payload).hexdigest(),
+                'font_cache': {'version': 1, 'archive_bytes': len(payload), 'fonts': refs}}
+
+    def cache_body(self, payload, request, reuse):
+        body, position = bytearray(), 0
+        for index in reuse:
+            ref = request['font_cache']['fonts'][index]
+            body.extend(payload[position:ref['offset']])
+            position = ref['offset'] + ref['bytes']
+        body.extend(payload[position:])
+        return bytes(body)
+
+    def negotiate(self, process, request):
+        process.stdin.write(json.dumps(request, separators=(',', ':')).encode() + b'\n')
+        process.stdin.flush()
+        marker = b'deployment_gateway_font_cache='
+        self.wait_marker(process, marker)
+        line = next(line for line in process.fixture_prefix.splitlines() if line.startswith(marker))
+        return json.loads(line[len(marker):])['reuse']
+
+    def cached_send(self, payload):
+        request = self.cached_request(payload)
+        process = self.start()
+        reuse = self.negotiate(process, request)
+        result = self.finish(process, self.cache_body(payload, request, reuse))
+        return reuse, result
+
+    def reset_release_state(self):
+        for name in ('child.json', 'child_done', 'received.tar'):
+            (self.root / name).unlink(missing_ok=True)
+
+    def assert_cache_empty(self):
+        cache = self.gateway_root / 'font-cache'
+        if cache.exists() and not cache.is_symlink():
+            self.assertFalse(list(cache.iterdir()))
 
     def start(self, idle_seconds=1, receive_seconds=3, mode='normal'):
         process = subprocess.Popen([sys.executable, '-c', WRAPPER, str(GATEWAY),
@@ -230,6 +294,268 @@ class CiGatewayTests(unittest.TestCase):
         self.assertNotIn(str(self.root).encode(), stdout + stderr)
         self.assertFalse(list(self.gateway_root.glob('incoming-*')))
         self.assert_lock_free()
+
+    def test_legacy_release_populates_cache_and_warm_release_reconstructs_identical_tar(self):
+        payload = self.font_archive()
+        code, _, stderr = self.send(self.wire(payload))
+        self.assertEqual(code, 0, stderr.decode())
+        request = self.cached_request(payload)
+        cache = self.gateway_root / 'font-cache'
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+        for ref in request['font_cache']['fonts']:
+            obj = cache / (ref['sha256'] + '.woff2')
+            self.assertEqual(obj.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(obj.stat().st_uid, os.getuid())
+            self.assertEqual(obj.stat().st_gid, os.getgid())
+            self.assertEqual(obj.stat().st_size, ref['bytes'])
+            self.assertEqual(hashlib.sha256(obj.read_bytes()).hexdigest(), ref['sha256'])
+        reuse, (code, stdout, stderr) = self.cached_send(payload)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [0, 1])
+        self.assertEqual((self.root / 'received.tar').read_bytes(), payload)
+        self.assertEqual(json.loads((self.root / 'child.json').read_text())['hash'], request['sha256'])
+        self.assertIn(b'font_cache_reused_files=2\n', stdout)
+        self.assertIn(b'font_cache_transferred_files=0\n', stdout)
+        self.assertIn(b'font_cache_transferred_bytes=0\n', stdout)
+        self.assertNotIn(b'SENSITIVE_', stdout + stderr)
+        self.assertLess(len(self.cache_body(payload, request, reuse)), len(payload) // 3)
+        self.assertFalse(list(cache.glob('.pending-*')))
+        self.assert_lock_free()
+
+    def test_cold_cache_changed_font_and_corrupt_object_are_transmitted_and_repaired(self):
+        payload = self.font_archive()
+        refs = self.cached_request(payload)['font_cache']['fonts']
+        reuse, (code, stdout, stderr) = self.cached_send(payload)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [])
+        self.assertIn(b'font_cache_transferred_files=2\n', stdout)
+        changed = self.font_archive(changed=True)
+        reuse, (code, stdout, stderr) = self.cached_send(changed)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [0])
+        self.assertIn(b'font_cache_reused_files=1\n', stdout)
+        self.assertIn(b'font_cache_transferred_files=1\n', stdout)
+        cache = self.gateway_root / 'font-cache'
+        old = cache / (refs[1]['sha256'] + '.woff2')
+        self.assertTrue(old.is_file(), 'old font objects remain available for older releases')
+        damaged = cache / (refs[0]['sha256'] + '.woff2')
+        damaged.write_bytes(b'x' * refs[0]['bytes'])
+        reuse, (code, _, stderr) = self.cached_send(changed)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [1])
+        self.assertEqual(hashlib.sha256(damaged.read_bytes()).hexdigest(), refs[0]['sha256'])
+        self.assertEqual((self.root / 'received.tar').read_bytes(), changed)
+        damaged.write_bytes(b'truncated')
+        reuse, (code, _, stderr) = self.cached_send(changed)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [1])
+        self.assertEqual(damaged.stat().st_size, refs[0]['bytes'])
+
+    def test_new_protocol_without_fonts_still_negotiates_empty_reuse(self):
+        payload = self.archive()
+        reuse, (code, stdout, stderr) = self.cached_send(payload)
+        self.assertEqual(code, 0, stderr.decode())
+        self.assertEqual(reuse, [])
+        self.assertIn(b'deployment_gateway_font_cache={"reuse":[]}\n', stdout)
+        self.assertEqual((self.root / 'received.tar').read_bytes(), payload)
+        self.assert_cache_empty()
+
+    def test_malformed_cache_headers_fail_before_release_or_cache_population(self):
+        request = self.cached_request(self.font_archive())
+        cases = []
+        for field, value in [('version', True), ('version', 2), ('archive_bytes', True),
+                             ('archive_bytes', 0), ('archive_bytes', 32 * 1024 * 1024 + 1),
+                             ('fonts', 'invalid'), ('fonts', [request['font_cache']['fonts'][0]] * 33)]:
+            invalid = copy.deepcopy(request)
+            invalid['font_cache'][field] = value
+            cases.append(invalid)
+        for field, value in [('offset', True), ('offset', -1), ('offset', 513), ('bytes', False),
+                             ('bytes', 0), ('bytes', 3), ('bytes', len(self.font_archive()) + 1),
+                             ('sha256', '../unsafe'), ('sha256', 'A' * 64)]:
+            invalid = copy.deepcopy(request)
+            invalid['font_cache']['fonts'][0][field] = value
+            cases.append(invalid)
+        invalid = copy.deepcopy(request)
+        invalid['font_cache']['fonts'].reverse()
+        cases.append(invalid)
+        invalid = copy.deepcopy(request)
+        invalid['font_cache']['fonts'][1]['offset'] = invalid['font_cache']['fonts'][0]['offset']
+        cases.append(invalid)
+        invalid = copy.deepcopy(request)
+        invalid['font_cache'] = None
+        cases.append(invalid)
+        for invalid in cases:
+            with self.subTest(cache=invalid['font_cache']):
+                code, stdout, stderr = self.send(json.dumps(invalid, separators=(',', ':')).encode() + b'\n')
+                self.assertNotEqual(code, 0)
+                self.assertNotIn(b'deployment_gateway_font_cache=', stdout)
+                self.assertIn(b'deployment_gateway_failed=true', stderr)
+                self.assert_no_release()
+                self.assert_cache_empty()
+
+    def test_valid_tar_with_misidentified_font_refs_does_not_populate_cache(self):
+        payload = self.font_archive()
+        for defect in ('offset', 'size', 'digest', 'missing', 'foreign'):
+            with self.subTest(defect=defect):
+                request = self.cached_request(payload)
+                refs = request['font_cache']['fonts']
+                if defect == 'offset':
+                    refs[0]['offset'] -= 512
+                elif defect == 'size':
+                    refs[0]['bytes'] -= 1
+                elif defect == 'digest':
+                    refs[0]['sha256'] = 'f' * 64
+                elif defect == 'missing':
+                    refs.pop()
+                else:
+                    refs[0] = {'offset': 512, 'bytes': 14,
+                               'sha256': hashlib.sha256(payload[512:526]).hexdigest()}
+                process = self.start()
+                self.assertEqual(self.negotiate(process, request), [])
+                code, stdout, _ = self.finish(process, payload)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn(b'deployment_gateway_release_started=true', stdout)
+                self.assert_no_release()
+                self.assert_cache_empty()
+
+    def test_duplicate_identity_cache_or_reference_keys_fail_before_negotiation(self):
+        request = self.cached_request(self.font_archive())
+        header = json.dumps(request, separators=(',', ':'))
+        cache_json = json.dumps(request['font_cache'], separators=(',', ':'))
+        cases = [
+            header.replace('"commit":', '"commit":"' + COMMIT + '","commit":', 1),
+            header.replace('"font_cache":', '"font_cache":' + cache_json + ',"font_cache":', 1),
+            header.replace('"version":1', '"version":1,"version":1', 1),
+            header.replace('"offset":', '"offset":0,"offset":', 1),
+        ]
+        for body in cases:
+            with self.subTest(header=body[:100]):
+                code, stdout, stderr = self.send(body.encode() + b'\n')
+                self.assertNotEqual(code, 0)
+                self.assertNotIn(b'deployment_gateway_font_cache=', stdout)
+                self.assertIn(b'deployment_gateway_failed=true', stderr)
+                self.assert_no_release()
+                self.assert_cache_empty()
+
+    def test_corrupt_or_truncated_or_extra_wire_bytes_never_fill_cold_cache(self):
+        payload = self.font_archive()
+        for defect in ('digest', 'manifest', 'commit', 'truncated', 'extra'):
+            with self.subTest(defect=defect):
+                body = payload
+                if defect == 'manifest':
+                    body = self.archive(corrupt=True, fonts={'assets/fonts/one.woff2': b'wOF2fixture'})
+                request = self.cached_request(body)
+                if defect == 'digest':
+                    request['sha256'] = 'f' * 64
+                elif defect == 'commit':
+                    request['commit'] = 'a' * 40
+                elif defect == 'truncated':
+                    body = body[:-1]
+                elif defect == 'extra':
+                    body += b'x'
+                process = self.start()
+                self.assertEqual(self.negotiate(process, request), [])
+                code, stdout, _ = self.finish(process, body)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn(b'deployment_gateway_release_started=true', stdout)
+                self.assert_no_release()
+                self.assert_cache_empty()
+
+    def test_cache_directory_symlink_or_wrong_mode_or_owner_fails_closed(self):
+        cache = self.gateway_root / 'font-cache'
+        outside = self.root / 'outside'
+        outside.mkdir(mode=0o700)
+        cache.symlink_to(outside, target_is_directory=True)
+        code, _, _ = self.send(self.wire())
+        self.assertNotEqual(code, 0)
+        self.assertFalse(list(outside.iterdir()))
+        self.assert_no_release()
+        cache.unlink()
+        cache.mkdir(mode=0o755)
+        code, _, _ = self.send(self.wire())
+        self.assertNotEqual(code, 0)
+        self.assert_no_release()
+        cache.chmod(0o700)
+        code, _, _ = self.finish(self.start(mode='wrong-cache-owner'), self.wire())
+        self.assertNotEqual(code, 0)
+        self.assert_no_release()
+
+    def test_cache_symlink_fifo_directory_hardlink_or_wrong_mode_fails_closed(self):
+        payload = self.font_archive()
+        request = self.cached_request(payload)
+        cache = self.gateway_root / 'font-cache'
+        cache.mkdir(mode=0o700)
+        path = cache / (request['font_cache']['fonts'][0]['sha256'] + '.woff2')
+        outside = self.root / 'outside-font'
+        outside.write_bytes(b'SENSITIVE_FIXTURE_FONT')
+        outside.chmod(0o600)
+        for defect in ('symlink', 'fifo', 'directory', 'hardlink', 'mode'):
+            with self.subTest(defect=defect):
+                if defect == 'symlink':
+                    path.symlink_to(outside)
+                elif defect == 'fifo':
+                    os.mkfifo(path, 0o600)
+                elif defect == 'directory':
+                    path.mkdir(mode=0o600)
+                elif defect == 'hardlink':
+                    os.link(outside, path)
+                else:
+                    path.write_bytes(b'unsafe mode')
+                    path.chmod(0o644)
+                code, stdout, stderr = self.send(json.dumps(request).encode() + b'\n')
+                self.assertNotEqual(code, 0)
+                self.assertNotIn(b'deployment_gateway_font_cache=', stdout)
+                self.assertNotIn(b'SENSITIVE_', stdout + stderr)
+                self.assertEqual(outside.read_bytes(), b'SENSITIVE_FIXTURE_FONT')
+                self.assert_no_release()
+                if defect == 'directory':
+                    path.rmdir()
+                else:
+                    path.unlink()
+
+    def test_cache_negotiation_requires_live_stdout_and_does_not_cache_partial_input(self):
+        request = self.cached_request(self.font_archive())
+        process = self.start()
+        self.wait_marker(process, b'deployment_gateway_receiving=true\n')
+        process.stdout.close()
+        process.stdout = None
+        code, _, stderr = self.finish(process, json.dumps(request).encode() + b'\n')
+        self.assertNotEqual(code, 0)
+        self.assertIn(b'deployment_gateway_failed=true', stderr)
+        self.assert_no_release()
+        self.assert_cache_empty()
+        process = self.start()
+        self.assertEqual(self.negotiate(process, request), [])
+        process.stdin.write(self.font_archive()[:100])
+        process.stdin.flush()
+        process.send_signal(signal.SIGTERM)
+        code, stdout, _ = self.finish(process)
+        self.assertEqual(code, 128 + signal.SIGTERM)
+        self.assertIn(b'deployment_gateway_cancelled=true', stdout)
+        self.assert_no_release()
+        self.assert_cache_empty()
+
+    def test_cached_input_still_requires_eof_and_absolute_deadline(self):
+        payload = self.font_archive()
+        code, _, stderr = self.send(self.wire(payload))
+        self.assertEqual(code, 0, stderr.decode())
+        self.reset_release_state()
+        request = self.cached_request(payload)
+        process = self.start()
+        reuse = self.negotiate(process, request)
+        process.stdin.write(self.cache_body(payload, request, reuse))
+        process.stdin.flush()
+        process.wait(timeout=5)
+        code, stdout, _ = self.finish(process)
+        self.assertNotEqual(code, 0)
+        self.assertIn(b'deployment_gateway_receive_idle_timeout=true', stdout)
+        self.assert_no_release()
+        process = self.start(idle_seconds=2, receive_seconds=0.1, mode='slow-cache')
+        code, stdout, _ = self.finish(process, json.dumps(request).encode() + b'\n')
+        self.assertNotEqual(code, 0)
+        self.assertIn(b'deployment_gateway_receive_timeout=true', stdout)
+        self.assertNotIn(b'deployment_gateway_font_cache=', stdout)
+        self.assert_no_release()
 
     def test_partial_header_and_body_have_a_bounded_idle_failure(self):
         for fragment in (b'{"commit":', self.wire()[:-100]):
