@@ -68,6 +68,21 @@ try {
   for(const [route,status] of [['/',200],['/api/rules',401],['/db.mjs',404],['/docs/penpa.md',404],['/data/trusted-users.json',404],['/calendar-workflow-policy.mjs',200]]) {
     assert.equal((await fetch(base+route)).status,status,route);
   }
+  const fontManifest=JSON.parse(fs.readFileSync(`${app}/assets/fonts/manifest.json`,'utf8'));
+  for (const {file} of fontManifest.files) {
+    const fontPath=`assets/fonts/${file}`;
+    const font=await fetch(`${base}/${fontPath}`);
+    assert.equal(font.status,200,fontPath);
+    assert.equal(font.headers.get('content-type'),'font/woff2');
+    assert.equal(font.headers.get('cache-control'),'public, max-age=31536000, immutable');
+    assert.deepEqual(Buffer.from(await font.arrayBuffer()),fs.readFileSync(`${app}/${fontPath}`));
+  }
+  const fontStyles=await fetch(base+'/assets/fonts/puhuiti.css');
+  assert.equal(fontStyles.status,200);
+  assert.equal(fontStyles.headers.get('content-type'),'text/css; charset=utf-8');
+  await fontStyles.arrayBuffer();
+  assert.equal((await fetch(base+'/assets/fonts/manifest.json')).status,404);
+  assert.equal((await fetch(base+'/assets/fonts/other.woff2')).status,404);
   const member=JSON.parse(fs.readFileSync(process.env.PUZARCHIVE_USERS_PATH,'utf8'))[0];
   const response=await fetch(base+'/api/register',{method:'POST',headers:{'content-type':'application/json',origin:base.replace('http:','https:'),'x-forwarded-proto':'https','x-real-ip':'192.0.2.5'},body:JSON.stringify({username:'fixture-preflight',password:'only-temporary-fixture-password',inviteCode:member.accessCode})});
   assert.equal(response.status,201);
@@ -82,7 +97,7 @@ try {
   assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   assert.equal(database.prepare('PRAGMA foreign_key_check').all().length,0);
   assert.equal(fs.statSync(process.env.PUZARCHIVE_USERS_PATH).mode&0o777,0o600);
-  console.log('preflight_nonroot=true\npreflight_capabilities=none\npreflight_code_read_only=true\npreflight_empty_data_owner_mode=0:0:755\npreflight_home_and_auth_boundaries=true\npreflight_proxy_secure_cookie=true\npreflight_packaged_penpa_guidelines=true\npreflight_sqlite_integrity_ok=true\npreflight_foreign_key_violations=0');
+  console.log('preflight_nonroot=true\npreflight_capabilities=none\npreflight_code_read_only=true\npreflight_empty_data_owner_mode=0:0:755\npreflight_home_and_auth_boundaries=true\npreflight_proxy_secure_cookie=true\npreflight_packaged_penpa_guidelines=true\npreflight_packaged_local_fonts=true\npreflight_sqlite_integrity_ok=true\npreflight_foreign_key_violations=0');
 } finally {await new Promise(resolve=>server.close(resolve));database.close();}
 JAVASCRIPT
 UNPRIVILEGED

@@ -51,6 +51,7 @@ const browserEnv = { ...process.env };
 if (process.env.PUZARCHIVE_BROWSER_LIB_DIR) browserEnv.LD_LIBRARY_PATH = [process.env.PUZARCHIVE_BROWSER_LIB_DIR, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
 let browser, page, interception = null;
 const requests = [], errors = [];
+const fontResponses = [];
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function request(url, method = 'GET', body = null, cookie = '') {
   const response = await fetch(base + url, { method, headers: { origin: base, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -90,6 +91,99 @@ async function assertAccountMenuReachable() {
   }), true, 'account menu stays in the viewport and outside sidebar clipping');
 }
 
+async function assertPuhuitiRendering(context) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'assets', 'fonts', 'manifest.json'), 'utf8'));
+  const fallback = manifest.files.find((entry) => entry.weight === 'fallback');
+  assert.ok(fallback, 'the complete font is available for uncommon characters');
+  const fallbackPath = `/assets/fonts/${fallback.file}`;
+  const commonText = '中文日历题目ABC123';
+  const weights = [400, 500, 600, 700];
+  const selectors = ['body', '.page-heading h1', '#calendarSearchInput', '#calendarSearchButton', '#calendarSort'];
+  const inspector = await context.newCDPSession(page);
+  async function assertCustomFont(selector) {
+    const { root: document } = await inspector.send('DOM.getDocument');
+    const { nodeId } = await inspector.send('DOM.querySelector', { nodeId: document.nodeId, selector });
+    assert.ok(nodeId, `${selector} exists for font inspection`);
+    const { fonts } = await inspector.send('CSS.getPlatformFontsForNode', { nodeId });
+    assert.ok(fonts.length > 0, `${selector} has rendered glyphs`);
+    assert.ok(fonts.every((font) => font.isCustomFont && /Alibaba.*PuHuiTi/i.test(font.familyName) && font.glyphCount > 0),
+      `${selector} renders with the downloaded Alibaba font: ${JSON.stringify(fonts)}`);
+  }
+  async function assertCommonFonts() {
+    const state = await page.evaluate(async ({ weights, commonText, selectors }) => {
+      let probes = document.querySelector('#browserFontProbes');
+      if (!probes) {
+        probes = document.createElement('div');
+        probes.id = 'browserFontProbes';
+        probes.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;pointer-events:none;font:14px var(--sans);';
+        for (const weight of weights) {
+          const span = document.createElement('span');
+          span.id = `browserFontWeight${weight}`;
+          span.style.fontWeight = String(weight);
+          span.textContent = commonText;
+          probes.append(span);
+        }
+        document.body.append(probes);
+      }
+      const loaded = await Promise.all(weights.map(async (weight) => {
+        const faces = await document.fonts.load(`${weight} 14px "Alibaba PuHuiTi"`, commonText);
+        return { weight, faces: faces.map((face) => ({ family: face.family, status: face.status })) };
+      }));
+      await document.fonts.ready;
+      return { loaded, families: selectors.map((selector) => ({ selector, family: getComputedStyle(document.querySelector(selector)).fontFamily })) };
+    }, { weights, commonText, selectors });
+    for (const { selector, family } of state.families) {
+      const families = family.split(',').map((name) => name.replace(/["']/g, '').trim());
+      assert.deepEqual(families.slice(0, 2), ['Alibaba PuHuiTi', 'Alibaba PuHuiTi Full'], `${selector} uses the same primary and complete fallback font`);
+    }
+    for (const { weight, faces } of state.loaded) {
+      assert.ok(faces.length > 0 && faces.every((face) => face.status === 'loaded' && face.family.replace(/["']/g, '') === 'Alibaba PuHuiTi'),
+        `the required common-character faces load at weight ${weight}`);
+      await assertCustomFont(`#browserFontWeight${weight}`);
+    }
+    for (const selector of ['.calendar-search-scope', '.page-heading h1']) await assertCustomFont(selector);
+    for (const weight of ['regular', 'medium', 'bold']) {
+      const expected = new Set(manifest.files.filter((entry) => entry.weight === weight).map((entry) => `/assets/fonts/${entry.file}`));
+      assert.ok(fontResponses.some((response) => expected.has(response.path) && response.status === 200 && response.type.startsWith('font/woff2')),
+        `${weight} font shards are served successfully from this site`);
+    }
+    assert.equal(fontResponses.some((response) => response.path === fallbackPath), false, 'ordinary desktop and mobile text does not download the complete font');
+  }
+  try {
+    await inspector.send('DOM.enable'); await inspector.send('CSS.enable');
+    await assertCommonFonts();
+    await page.evaluate(() => document.querySelector('#browserFontProbes').remove());
+    await screenshot('puhuiti-calendar-browser-desktop.png');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertCommonFonts();
+    await page.evaluate(() => document.querySelector('#browserFontProbes').remove());
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'the unified font keeps the 390px layout within its viewport');
+    await screenshot('puhuiti-calendar-browser-mobile.png');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const beforeRare = fontResponses.length;
+    await page.evaluate(async (character) => {
+      const probe = document.createElement('span');
+      probe.id = 'browserRareFontProbe';
+      probe.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;pointer-events:none;font:700 24px var(--sans);';
+      probe.textContent = character;
+      document.body.append(probe);
+      // Let the normal CSS family cascade request the full font only when its
+      // glyph is needed; explicitly loading it would hide a broken fallback.
+      probe.getBoundingClientRect();
+      await new Promise(requestAnimationFrame);
+      await document.fonts.ready;
+    }, manifest.probe.character);
+    await assertCustomFont('#browserRareFontProbe');
+    assert.ok(fontResponses.slice(beforeRare).some((response) => response.path === fallbackPath && response.status === 200 && response.type.startsWith('font/woff2')),
+      `${manifest.probe.codepoint} triggers the locally served complete font`);
+    console.log('PASS: local Alibaba fonts render Chinese at all four site weights, match form controls, avoid complete-font downloads on ordinary pages, cover uncommon Chinese and keep the 390px layout within its viewport');
+  } finally {
+    await page.evaluate(() => { document.querySelector('#browserFontProbes')?.remove(); document.querySelector('#browserRareFontProbe')?.remove(); });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await inspector.detach();
+  }
+}
+
 try {
   browser = await chromium.launch({ executablePath: executable, env: browserEnv, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
@@ -111,6 +205,12 @@ try {
   page = await context.newPage(); page.setDefaultTimeout(10000);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (incoming) => { const url = new URL(incoming.url()); if (url.origin === base) requests.push({ method: incoming.method(), path: url.pathname }); });
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (url.origin === base && url.pathname.startsWith('/assets/fonts/') && url.pathname.endsWith('.woff2')) {
+      fontResponses.push({ path: url.pathname, status: response.status(), type: response.headers()['content-type'] || '' });
+    }
+  });
   await page.goto(base); await page.locator('#authUsername').waitFor();
   assert.equal(await page.locator('.topbar, #breadcrumbCurrent').count(), 0);
   assert.equal(await page.locator('.sidebar').isVisible(), false);
@@ -125,6 +225,9 @@ try {
   await page.locator('#authForm [type="submit"]').click(); await page.locator('.primary-nav .nav-item.active[data-route-link="calendar"]').waitFor();
   assert.equal((await request('/api/calendar/puzzles')).status, 401);
   console.log('PASS: Chromium rejects seven-character passwords, registers eight-character passwords, real session cookie, private bootstrap and anonymous API boundary');
+
+  await page.locator('#calendarSearchInput').waitFor();
+  await assertPuhuitiRendering(context);
 
   assert.equal(await page.locator('.primary-nav').count(), 1);
   assert.equal(await page.locator('.calendar-view-switch').count(), 0);

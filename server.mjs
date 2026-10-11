@@ -26,9 +26,11 @@ const dataDir = path.join(rootDir,'data');
 const usersPath = process.env.PUZARCHIVE_USERS_PATH || path.join(dataDir,'trusted-users.json');
 const port = Number(process.env.PORT || 4173);
 const categories = new Set(['涂黑','填数','分区','置物','路径','其它']);
-const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml' };
-const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs','calendar-workflow-policy.mjs','inbox-policy.mjs']);
-const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline' https://fonts.googleapis.com","font-src 'self' https://fonts.gstatic.com","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
+const mimeTypes = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.woff2':'font/woff2' };
+const fontManifest = JSON.parse(fs.readFileSync(path.join(rootDir,'assets/fonts/manifest.json'),'utf8'));
+const fontAssets = new Set(fontManifest.files.map(({file})=>`assets/fonts/${file}`));
+const allowedAssets = new Set(['index.html','app.js','styles.css','puzzle-url.mjs','puzzle-tool-links.mjs','auth-policy.mjs','rule-policy.mjs','calendar-review-policy.mjs','calendar-workflow-policy.mjs','inbox-policy.mjs','assets/fonts/puhuiti.css',...fontAssets]);
+const contentSecurityPolicy = ["default-src 'self'","script-src 'self'","style-src 'self' 'unsafe-inline'","font-src 'self'","img-src 'self' data:","connect-src 'self'",`frame-src ${TRUSTED_PUZZLE_FRAME_SOURCES.join(' ')}`,"object-src 'none'","base-uri 'self'","form-action 'self'","frame-ancestors 'self'"].join('; ');
 const SESSION_COOKIE='puzarchive_session';
 const SESSION_MS=1000*60*60*24*14;
 const loginAttempts=new Map();
@@ -530,7 +532,7 @@ function serveStatic(response,pathname) {
   if (normalized!==relative || !allowedAssets.has(normalized)) return sendJson(response,404,{error:'Not found'});
   const filePath=path.join(rootDir,normalized);
   if (!fs.existsSync(filePath)||fs.statSync(filePath).isDirectory()) return sendJson(response,404,{error:'Not found'});
-  response.writeHead(200,{'Content-Type':mimeTypes[path.extname(filePath)]||'application/octet-stream','Content-Security-Policy':contentSecurityPolicy,'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin','X-Frame-Options':'SAMEORIGIN'});
+  response.writeHead(200,{'Content-Type':mimeTypes[path.extname(filePath)]||'application/octet-stream','Content-Security-Policy':contentSecurityPolicy,'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin','X-Frame-Options':'SAMEORIGIN',...(fontAssets.has(normalized)?{'Cache-Control':'public, max-age=31536000, immutable'}:{})});
   fs.createReadStream(filePath).pipe(response);
 }
 export function createServer({trustLoopbackProxy=process.env.PUZARCHIVE_TRUST_LOOPBACK_PROXY==='true'}={}) {

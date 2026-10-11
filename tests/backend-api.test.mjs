@@ -118,6 +118,29 @@ test('one-time invite migration preserves identities, invalidates old sessions, 
   assert.equal((await request('/db.mjs')).response.status,404);
   assert.equal((await request('/scripts/import-rules.mjs')).response.status,404);
   assert.equal((await request('/tools/prepare-rule-import.py')).response.status,404);
+  const fontManifest=JSON.parse(fs.readFileSync(new URL('../assets/fonts/manifest.json',import.meta.url),'utf8'));
+  for (const {file,sha256,bytes:expectedBytes} of fontManifest.files) {
+    const font=await fetch(`${base}/assets/fonts/${file}`);
+    assert.equal(font.status,200,file);
+    assert.equal(font.headers.get('content-type'),'font/woff2');
+    assert.equal(font.headers.get('cache-control'),'public, max-age=31536000, immutable');
+    assert.equal(font.headers.get('x-content-type-options'),'nosniff');
+    assert.match(font.headers.get('content-security-policy'),/(?:^|; )font-src 'self'(?:;|$)/);
+    const bytes=Buffer.from(await font.arrayBuffer());
+    assert.equal(bytes.subarray(0,4).toString(),'wOF2');
+    assert.equal(bytes.length,expectedBytes);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'),sha256);
+    assert.ok(file.includes(sha256.slice(0,12)), 'immutable font URL contains its content hash');
+  }
+  for (const asset of ['/','/styles.css','/assets/fonts/puhuiti.css']) {
+    const response=await fetch(base+asset);
+    assert.equal(response.status,200);
+    assert.doesNotMatch(response.headers.get('cache-control')||'',/immutable/);
+    await response.arrayBuffer();
+  }
+  for (const asset of ['assets/fonts','assets/fonts/other.woff2','assets/fonts/manifest.json','assets/fonts/README.md','assets/fonts/LEGAL-NOTICE-3.0.txt','assets/fonts/alibaba-puhuiti3-regular.ttf']) {
+    assert.equal((await request(`/${asset}`)).response.status,404,asset);
+  }
 
   const rotatedCode=await request('/api/register',{method:'POST',body:JSON.stringify({inviteCode:'stale-ada-code-before-rotation',username:'Ada',password:'correct horse battery staple'})});
   assert.equal(rotatedCode.response.status,400);
