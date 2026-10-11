@@ -293,7 +293,7 @@ function calendarReviewParticipantsMarkup(participants = {}) {
   return `<dl class="participant-list vote-participants">${[-2,-1,0,1,2,'veto'].map((value) => {
     const label = calendarVoteLabel(value);
     const icon = [-2,0,2,'veto'].includes(value);
-    return `<div class="participant-row${value === 'veto' ? ' participant-veto-row' : ''}" data-liking-value="${value}"><dt title="${esc(label)}">${icon ? `${calendarLikingIcon(value)}<span class="sr-only">${esc(label)}</span>` : `<span>${value > 0 ? '+' : ''}${value}</span><span class="sr-only"> 分</span>`}</dt><dd>${participantNamesMarkup(participants?.[value], value === 'veto' ? '暂无否决' : '暂无')}</dd></div>`;
+    return `<div class="participant-row${value === 'veto' ? ' participant-veto-row' : ''}" data-liking-value="${value}"><dt title="${esc(label)}">${icon ? calendarLikingIcon(value) : ''}<span class="sr-only">${esc(label)}</span></dt><dd>${participantNamesMarkup(participants?.[value], value === 'veto' ? '暂无否决' : '暂无')}</dd></div>`;
   }).join('')}</dl>`;
 }
 function ratingParticipantsMarkup(participants, label = '评分者') {
