@@ -770,6 +770,9 @@ export function markInboxNotificationRead(userId,id) {
     WHERE id=? AND recipient_user_id=?`).run(id,userId);
   return result.changes>0;
 }
+export function deleteInboxNotification(userId,id) {
+  return database.prepare('DELETE FROM user_notifications WHERE id=? AND recipient_user_id=?').run(id,userId).changes>0;
+}
 export function markAllInboxNotificationsRead(userId) {
   return database.prepare(`UPDATE user_notifications SET read_at=CURRENT_TIMESTAMP
     WHERE recipient_user_id=? AND read_at IS NULL`).run(userId).changes;

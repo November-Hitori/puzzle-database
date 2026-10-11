@@ -10,7 +10,7 @@ import {
   getCalendarPuzzles, getCalendarPage, getCollection, getCollections, getFolders, getPuzzles, getRule,
   getRules, getTags, registerAccountWithGate, renameAccount, ruleHasVariants, submitRuleAudit, updateCalendarSuggestedDate,
   updateRule, deleteRule, deleteCalendarPuzzle, getCalendarLeftovers, completeCalendarReview,
-  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead, setInboxNotificationTags
+  setQualityErrorIgnored, assignCalendarDate, submitCalendarPenpaAudit, updateCalendarPuzzle, updateCalendarPenpaLinks, getCalendarComments, addCalendarComment, reenterCalendarPuzzle, getInbox, markInboxNotificationRead, markAllInboxNotificationsRead, setInboxNotificationTags, deleteInboxNotification
 } from './db.mjs';
 import { getPenpaGuidelines } from './penpa-guidelines.mjs';
 import { normalizeCalendarLinks } from './calendar-workflow-policy.mjs';
@@ -290,6 +290,12 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     if (normalized.error) return sendJson(response,400,{error:normalized.error});
     const result=setInboxNotificationTags(user.id,id,normalized.value.tags);
     return result?sendJson(response,200,result):sendJson(response,404,{error:'notification not found'});
+  }
+  const inboxDeleteMatch=pathname.match(/^\/api\/inbox\/(\d+)$/);
+  if (request.method==='DELETE'&&inboxDeleteMatch) {
+    const id=Number(inboxDeleteMatch[1]);
+    if (!Number.isSafeInteger(id)||id<1||!deleteInboxNotification(user.id,id)) return sendJson(response,404,{error:'notification not found'});
+    return sendJson(response,200,{deleted:true,id,unreadCount:getInbox(user.id,{limit:1}).unreadCount});
   }
   const ruleMatch=pathname.match(/^\/api\/rules\/(\d+)$/);
   if (request.method==='GET' && ruleMatch) { const rule=getRule(Number(ruleMatch[1]),user.id); return rule?sendJson(response,200,{rule}):sendJson(response,404,{error:'rule not found'}); }

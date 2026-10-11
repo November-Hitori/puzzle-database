@@ -32,7 +32,7 @@ API 包括：
 - `POST /api/calendar/puzzles/:number/penpa-audits`：对当前 `revision`、`guidelinesRevision` 提交 `approve` / `reject` 和可选建议；重复投票不重复计数
 - `POST /api/rules/:id/error-ignores`、`POST /api/calendar/puzzles/:number/error-ignores`：以当前错误的 `key`、`revision` 提交 `ignored` 和可选 `reason`；错误对应内容改版后旧忽略不适用
 - `GET /api/penpa-guidelines`：读取制图规范正文与规范版本
-- `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读、添加星标／旗帜／书签／喜爱图标标签。使用 `read=all|read|unread` 和 `tag=all|tagged|untagged` 组合筛选，筛选后再分页，未读数量始终统计账号全部通知。`PATCH /api/inbox/:id/tags` 的 `{tags:["star","flag","bookmark","heart"]}` 按集合替换标签，重复 ID 合并，空数组移除所有标签
+- `/api/inbox`：读取账号的系统通知（不是私聊），包括已知规则创建者的审计结果和投稿者的日历状态通知；支持标记单条或全部已读、添加星标和删除消息。界面仅保留星星标记，旧图标标签统一显示为星标，取消星标时清除所有旧标签。使用 `read=all|read|unread` 和 `tag=all|tagged|untagged` 组合筛选，筛选后再分页，未读数量始终统计账号全部通知。`PATCH /api/inbox/:id/tags` 的 `{tags:["star"]}` 添加星标，空数组移除所有标签，旧标签 ID 保持兼容。`DELETE /api/inbox/:id` 仅删除当前账号的消息及关联标签，并返回最新未读数，不影响关联谜题或规则
 - `/api/puzzles`、`/api/folders`、`/api/collections`、`/api/tags`：现有公共题库管理 API，只包含公共题目
 
 共享邀请码可注册多个独立账号。用户名按 Unicode NFKC 规范化并以小写键保证唯一，长度为 2–32 个 Unicode 字符（字母、数字、下划线或连字符）；密码为 8–128 个 Unicode 字符且不超过 512 UTF-8 字节。密码使用带随机盐的 scrypt 哈希存储（N=131072、r=8、p=1），服务不保存明文密码；浏览器只持有 HttpOnly、SameSite=Strict 的会话 Cookie。提交操作校验同源来源。用环境变量 `PUZARCHIVE_DB_PATH`、`PUZARCHIVE_USERS_PATH` 可指定隔离数据库和成员配置路径（也用于测试）。

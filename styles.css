@@ -387,13 +387,16 @@ body[data-auth-state="unauthenticated"] .page-wrap { width: min(100% - 40px, 680
 .inbox-filters select { min-width: 145px; min-height: 36px; padding: 7px 28px 7px 10px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--panel); color: var(--ink); font: 12px var(--sans); }
 .inbox-tag-hint { align-self: center; margin-left: auto; color: var(--muted); font-size: 10px; }
 .inbox-tag-options { display: flex; gap: 5px; }
-.inbox-tag-button { display: grid; width: 32px; height: 32px; padding: 6px; place-items: center; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--muted); }
-.inbox-tag-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.inbox-tag-button, .inbox-delete-button { display: grid; width: 32px; height: 32px; padding: 6px; place-items: center; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--muted); }
+.inbox-tag-button svg, .inbox-delete-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .inbox-tag-button:hover { border-color: var(--accent-deep); color: var(--accent-deep); }
 .inbox-tag-button[aria-pressed="true"] { border-color: var(--accent-deep); background: #f8eee9; color: var(--accent-deep); }
 .inbox-tag-button[aria-pressed="true"] svg { fill: currentColor; fill-opacity: .2; }
+.inbox-delete-button { border-color: #efc8c5; color: #c0392b; }
+.inbox-delete-button:hover { border-color: #a93226; background: #fdf0ef; color: #a93226; }
 .inbox-tag-button:focus-visible, .inbox-filters select:focus-visible { outline: 2px solid var(--accent-deep); outline-offset: 3px; }
-.inbox-tag-button:disabled { cursor: wait; opacity: .55; }
+.inbox-delete-button:focus-visible { outline: 2px solid #c0392b; outline-offset: 3px; }
+.inbox-tag-button:disabled, .inbox-delete-button:disabled { cursor: wait; opacity: .55; }
 .inbox-error { color: var(--accent-deep); font-size: 11px; }
 .inbox-more { display: flex; justify-content: center; margin: 18px 0; }
 .list-pagination { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; padding: 20px 0; }

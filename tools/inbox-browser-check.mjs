@@ -65,6 +65,7 @@ function inboxGets(start = 0, match = () => true) {
 const hasOffset = (offset) => (url) => url.searchParams.get('offset') === String(offset);
 const item = (id) => page.locator(`article.inbox-item[data-inbox-id="${id}"]`);
 const tag = (id, name) => page.locator(`button[data-inbox-id="${id}"][data-inbox-tag="${name}"]`);
+const deleteButton = (id) => page.locator(`button[data-inbox-delete="${id}"]`);
 async function waitCount(count) {
   await page.waitForFunction((expected) => document.querySelectorAll('article.inbox-item').length === expected && !document.querySelector('#refreshInboxButton')?.disabled, count);
 }
@@ -235,7 +236,8 @@ try {
   await assertGlobalUnread(40);
   await selectFilters('all', 'all', 10); await assertPageCount(6);
   console.log('PASS: a late jump cannot overwrite a new filtered page; filtered total pages and global unread count remain accurate');
-  for (const name of ['star', 'flag', 'bookmark', 'heart']) {
+  assert.equal(await item(topId).locator('[data-inbox-tag]').count(), 1);
+  for (const name of ['star']) {
     const button = tag(topId, name);
     assert.equal(await button.count(), 1);
     assert.equal(await button.locator('svg').count(), 1);
@@ -244,6 +246,17 @@ try {
     assert.equal((await button.textContent()).trim(), '');
     assert.equal(await button.getAttribute('aria-pressed'), 'false');
   }
+  const trash = deleteButton(topId);
+  assert.equal(await trash.count(), 1);
+  assert.equal(await trash.locator('svg').count(), 1);
+  assert.match(await trash.getAttribute('aria-label'), /删除/);
+  assert.match(await trash.getAttribute('title'), /删除/);
+  assert.equal((await trash.textContent()).trim(), '');
+  assert.equal(await trash.evaluate((button) => {
+    const [red, green, blue] = getComputedStyle(button).color.match(/\d+/g).map(Number);
+    return red > green * 1.4 && red > blue * 1.4;
+  }), true, 'trash icon uses a red foreground');
+  assert.equal(await page.locator('[data-inbox-tag="flag"], [data-inbox-tag="bookmark"], [data-inbox-tag="heart"]').count(), 0);
   const beforeSave = requests.length;
   const tagStarted = intercept({ method: 'PATCH', path: `/api/inbox/${topId}/tags`, delay: 900 });
   await tag(topId, 'star').click();
@@ -260,12 +273,25 @@ try {
   await page.locator('#newUsername').waitFor();
   assert.equal(await page.locator('#newUsername').evaluate((input) => document.activeElement === input), true);
   await page.locator('#modalBackdrop .modal-cancel').click();
-  for (const name of ['flag', 'bookmark', 'heart']) { await tag(topId, name).click(); await waitPressed(topId, name, true); }
-  await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
   let persisted = await request('/api/inbox?limit=50', 'GET', null, ownerSession.cookie);
-  assert.deepEqual([...persisted.body.notifications.find((entry) => entry.id === topId).tags].sort(), ['bookmark', 'flag', 'heart']);
+  assert.deepEqual(persisted.body.notifications.find((entry) => entry.id === topId).tags, ['star']);
+  await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
+  persisted = await request('/api/inbox?limit=50', 'GET', null, ownerSession.cookie);
+  assert.deepEqual(persisted.body.notifications.find((entry) => entry.id === topId).tags, []);
+  // Previously saved markers all appear as a selected star; clearing it removes
+  // the complete legacy selection, and selecting again saves only one marker.
+  const legacyTags = await request(`/api/inbox/${topId}/tags`, 'PATCH', { tags: ['bookmark', 'flag', 'heart'] }, ownerSession.cookie);
+  assert.equal(legacyTags.status, 200);
   await page.reload({ waitUntil: 'domcontentloaded' }); await waitCount(10);
-  for (const name of ['flag', 'bookmark', 'heart']) assert.equal(await tag(topId, name).getAttribute('aria-pressed'), 'true');
+  await waitPressed(topId, 'star', true);
+  await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
+  persisted = await request('/api/inbox?limit=50', 'GET', null, ownerSession.cookie);
+  assert.deepEqual(persisted.body.notifications.find((entry) => entry.id === topId).tags, []);
+  await tag(topId, 'star').click(); await waitPressed(topId, 'star', true);
+  await page.reload({ waitUntil: 'domcontentloaded' }); await waitCount(10);
+  await waitPressed(topId, 'star', true);
+  persisted = await request('/api/inbox?limit=50', 'GET', null, ownerSession.cookie);
+  assert.deepEqual(persisted.body.notifications.find((entry) => entry.id === topId).tags, ['star']);
   await snapshot('inbox-icons-browser-desktop.png');
   await page.locator('#accountMenuButton').click(); await page.locator('#accountMenu').waitFor({ state: 'visible' });
   await snapshot('sidebar-account-menu-browser-desktop.png');
@@ -304,10 +330,18 @@ try {
   await page.locator('#inboxButton').click(); await waitCount(10);
   assert.equal(new URL(page.url()).hash, '#messages');
   await assertGlobalUnread(40);
+  assert.equal(await item(topId).locator('[data-inbox-tag]').count(), 1);
+  assert.equal(await deleteButton(topId).evaluate((button) => {
+    const bounds = button.getBoundingClientRect();
+    const [red, green, blue] = getComputedStyle(button).color.match(/\d+/g).map(Number);
+    return bounds.width >= 32 && bounds.height >= 32 && bounds.left >= 0 && bounds.right <= innerWidth
+      && red > green * 1.4 && red > blue * 1.4
+      && button.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+  }), true, 'mobile trash icon stays red and reachable');
   await snapshot('inbox-icons-browser-mobile.png');
   await page.setViewportSize({ width: 1440, height: 1000 });
-  for (const name of ['flag', 'bookmark', 'heart']) { await tag(topId, name).click(); await waitPressed(topId, name, false); }
-  console.log('PASS: four accessible icon-only toggles, multiple labels, removal, persistence, duplicate protection and mobile layout');
+  await tag(topId, 'star').click(); await waitPressed(topId, 'star', false);
+  console.log('PASS: one accessible star marker, legacy marker clearing, persisted selection, duplicate protection and red accessible desktop/mobile trash icons');
 
   intercept({ method: 'PATCH', path: `/api/inbox/${topId}/tags`, fail: true });
   await tag(topId, 'star').click();
@@ -436,7 +470,7 @@ try {
     // writes are protected by the rename guard rather than an inbox load.
     await selectFilters('unread', 'tagged', 10);
     assert.equal(await page.locator('.inbox-list').getAttribute('aria-busy'), 'false');
-    const protectedButtons = page.locator('[data-inbox-tag], [data-inbox-read], #markAllInboxReadButton, #changeUsernameButton');
+    const protectedButtons = page.locator('[data-inbox-tag], [data-inbox-read], [data-inbox-delete], #markAllInboxReadButton, #changeUsernameButton');
     assert.ok(await protectedButtons.count());
     assert.equal(await protectedButtons.evaluateAll((buttons) => buttons.every((button) => button.disabled)), true);
     // Dispatching bypasses the browser's disabled-click suppression and also
@@ -444,7 +478,7 @@ try {
     await protectedButtons.evaluateAll((buttons) => buttons.forEach((button) => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))));
     await delay(100);
     assert.equal(await page.locator('#newUsername').count(), 0);
-    assert.equal(requests.slice(beforeRename).filter((entry) => entry.path.startsWith('/api/inbox/') && ['PATCH', 'POST'].includes(entry.method)).length, 0);
+    assert.equal(requests.slice(beforeRename).filter((entry) => entry.path.startsWith('/api/inbox/') && ['PATCH', 'POST', 'DELETE'].includes(entry.method)).length, 0);
     assert.equal(requests.slice(beforeRename).filter((entry) => entry.path === '/api/account/username' && entry.method === 'PATCH').length, 1);
   } finally { finishRename(); }
   await page.waitForFunction(() => document.querySelector('#profileButton strong')?.textContent === 'InboxRenamed');
@@ -462,15 +496,103 @@ try {
   assert.equal(await page.locator('[data-inbox-tag="star"][aria-pressed="true"]').count(), 10);
   assert.equal(db.database.prepare('SELECT username FROM trusted_users WHERE id=?').get('inbox-owner').username, 'InboxRenamed');
   assert.equal(await page.locator('#changeUsernameButton').isEnabled(), true);
-  assert.equal(await page.locator('[data-inbox-tag], [data-inbox-read], #markAllInboxReadButton').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
+  assert.equal(await page.locator('[data-inbox-tag], [data-inbox-read], [data-inbox-delete], #markAllInboxReadButton').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
   await chooseAccountAction('#changeUsernameButton'); await page.locator('#newUsername').waitFor();
   await page.locator('#modalBackdrop .modal-cancel').click();
   console.log('PASS: pending inbox saves defer username editing; a closed pending rename blocks writes, then retains filters and releases controls after an old response');
 
+  // Deleting an unread item must refill the current page, discard pre-delete
+  // cached boundaries, and ignore the next page captured before the deletion.
+  await selectFilters('all', 'all', 10);
+  await tag(topId, 'star').click(); await waitPressed(topId, 'star', true);
+  const staleDeletePage = holdIntercept({ path: '/api/inbox', match: (url) => hasOffset(10)(url)
+    && url.searchParams.get('read') === 'all' && url.searchParams.get('tag') === 'all' });
+  await page.locator('#refreshInboxButton').click(); await waitPage(1); await staleDeletePage.started;
+  const beforeDelete = requests.length;
+  const deleteStarted = intercept({ method: 'DELETE', path: `/api/inbox/${topId}`, delay: 900 });
+  await deleteButton(topId).click(); await deleteStarted;
+  assert.equal(await item(topId).count(), 1);
+  assert.equal(await page.locator('#modalBackdrop').isVisible(), false, 'trash deletes directly without a confirmation modal');
+  assert.equal(await item(topId).locator('button').evaluateAll((buttons) => buttons.every((button) => button.disabled)), true);
+  assert.equal(await page.locator('#markAllInboxReadButton').isDisabled(), true);
+  await item(topId).locator('button').evaluateAll((buttons) => buttons.forEach((button) => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))));
+  await chooseAccountAction('#changeUsernameButton');
+  await page.locator('#toast.show').filter({ hasText: '请等待消息保存完成后再修改用户名' }).waitFor();
+  assert.equal(await page.locator('#newUsername').count(), 0);
+  await item(topId).waitFor({ state: 'detached' }); await waitPage(1);
+  await assertGlobalUnread(38); await assertPageCount(6);
+  staleDeletePage.release(); await delay(150);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 51 - index));
+  assert.equal(requests.slice(beforeDelete).filter((entry) => entry.method === 'DELETE' && entry.path === `/api/inbox/${topId}`).length, 1);
+  assert.equal(requests.slice(beforeDelete).filter((entry) => entry.path.startsWith(`/api/inbox/${topId}/`) && ['PATCH', 'POST'].includes(entry.method)).length, 0);
+  await page.locator('#nextInboxPageButton').click(); await waitPage(2);
+  await assertVisibleNumbers(Array.from({ length: 10 }, (_, index) => 41 - index));
+  assert.equal(db.database.prepare('SELECT id FROM user_notifications WHERE id=?').get(topId), undefined);
+  assert.equal(db.database.prepare('SELECT COUNT(*) AS count FROM user_notification_tags WHERE notification_id=?').get(topId).count, 0);
+  persisted = await request('/api/inbox?offset=0&limit=50', 'GET', null, ownerSession.cookie);
+  assert.equal(persisted.status, 200);
+  assert.equal(persisted.body.notifications.some((entry) => entry.id === topId), false);
+  assert.equal(persisted.body.total, 51);
+  assert.equal(persisted.body.unreadCount, 38);
+  await page.reload({ waitUntil: 'domcontentloaded' }); await waitPage(1);
+  assert.equal(await item(topId).count(), 0); await assertGlobalUnread(38);
+  console.log('PASS: one direct unread deletion survives reload, removes tags, updates unread count, blocks duplicate writes and invalidates delayed prefetch boundaries');
+
+  // Stay on page two as it shrinks, then fall back when its final read message
+  // is deleted. Read deletions must never decrement the global unread badge.
+  await selectFilters('read', 'all', 10); await assertPageCount(2);
+  await jumpPage(2, 3); await assertVisibleNumbers([3, 2, 1]);
+  for (const [number, pageNumber, count] of [[1, 2, 2], [2, 2, 1], [3, 1, 10]]) {
+    const id = fixtures.find((fixture) => fixture.number === number).id;
+    await deleteButton(id).click(); await item(id).waitFor({ state: 'detached' });
+    await waitPage(pageNumber, count); await assertGlobalUnread(38);
+    assert.equal(db.database.prepare('SELECT id FROM user_notifications WHERE id=?').get(id), undefined);
+  }
+  await assertPageCount(1);
+  await assertVisibleNumbers([44, 12, 11, 10, 9, 8, 7, 6, 5, 4]);
+  assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
+  console.log('PASS: read deletions preserve the page and unread badge, and deleting the final last-page message returns to the preceding page');
+
+  await selectFilters('all', 'all', 10);
+  const retryDeleteId = fixtures.find(({ number }) => number === 51).id;
+  const beforeFailedDelete = await visibleIds();
+  const failedDelete = intercept({ method: 'DELETE', path: `/api/inbox/${retryDeleteId}`, fail: true });
+  await deleteButton(retryDeleteId).click(); await failedDelete;
+  await page.locator('.inbox-error').filter({ hasText: 'inbox simulated outage' }).waitFor();
+  assert.equal(await deleteButton(retryDeleteId).isEnabled(), true);
+  assert.deepEqual(await visibleIds(), beforeFailedDelete);
+  await assertGlobalUnread(38);
+  assert.ok(db.database.prepare('SELECT id FROM user_notifications WHERE id=?').get(retryDeleteId));
+  await deleteButton(retryDeleteId).click(); await item(retryDeleteId).waitFor({ state: 'detached' });
+  await waitPage(1); await assertGlobalUnread(37);
+  assert.equal(await page.locator('.inbox-error').count(), 0);
+  await page.reload({ waitUntil: 'domcontentloaded' }); await waitPage(1);
+  assert.equal(await item(retryDeleteId).count(), 0); await assertGlobalUnread(37);
+  assert.equal(db.database.prepare('SELECT COUNT(*) AS count FROM user_notifications WHERE recipient_user_id=?').get('inbox-owner').count, 47);
+  assert.ok(db.database.prepare('SELECT id FROM user_notifications WHERE id=? AND recipient_user_id=?').get(otherId, 'inbox-other'));
+  console.log('PASS: failed deletion retains the message and unread badge; direct retry persists without changing another member\'s inbox');
+
+  // The cached total can also be stale after another client deletes earlier
+  // messages. Clamp using the server's new total after the current deletion.
+  await jumpPage(5, 7); await assertVisibleNumbers([10, 9, 8, 7, 6, 5, 4]);
+  for (const number of [50, 49, 48, 47, 46, 45, 43, 42, 41, 40]) {
+    const id = fixtures.find((fixture) => fixture.number === number).id;
+    const removed = await request(`/api/inbox/${id}`, 'DELETE', null, ownerSession.cookie);
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.deleted, true);
+  }
+  const concurrentDeleteId = fixtures.find(({ number }) => number === 4).id;
+  await deleteButton(concurrentDeleteId).click(); await item(concurrentDeleteId).waitFor({ state: 'detached' });
+  await waitPage(4, 6); await assertPageCount(4);
+  await assertVisibleNumbers([10, 9, 8, 7, 6, 5]);
+  await assertGlobalUnread(27);
+  assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
+  console.log('PASS: concurrent deletions on earlier pages trigger an authoritative last-page fallback with the correct rows and unread badge');
+
   // Capture a direct page jump, then log out and sign in as another member.
   await selectFilters('all', 'all', 10);
-  const staleSession = intercept({ path: '/api/inbox', match: hasOffset(40), capture: true, delay: 1300 });
-  await page.locator('#inboxPageInput').fill('5'); await page.locator('#jumpInboxPageButton').click(); await staleSession;
+  const staleSession = intercept({ path: '/api/inbox', match: hasOffset(30), capture: true, delay: 1300 });
+  await page.locator('#inboxPageInput').fill('4'); await page.locator('#jumpInboxPageButton').click(); await staleSession;
   await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
   await login('InboxOther'); await waitCount(1); await assertGlobalUnread(1);
   await delay(1500);
@@ -485,9 +607,29 @@ try {
   assert.equal(await page.locator('#inboxPageInput').isDisabled(), true);
   assert.equal(await page.locator('#previousInboxPageButton').isDisabled(), true);
   assert.equal(await page.locator('#nextInboxPageButton').isDisabled(), true);
+
+  // A deletion response for the previous member must not clear the new
+  // member's notifications, count, loading state or enabled write controls.
+  await selectFilters('all', 'all', 1);
+  const staleDeleteSession = holdIntercept({ method: 'DELETE', path: `/api/inbox/${otherId}` });
+  await deleteButton(otherId).click(); await staleDeleteSession.started;
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
+  await login('InboxRenamed'); await waitPage(1); await assertGlobalUnread(27);
+  const newSessionIds = await visibleIds();
+  staleDeleteSession.release(); await delay(150);
+  assert.deepEqual(await visibleIds(), newSessionIds);
+  await assertGlobalUnread(27); await assertPageCount(4);
+  assert.equal(await page.locator('[data-inbox-tag], [data-inbox-read], [data-inbox-delete]').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
+  assert.equal(await item(otherId).count(), 0);
+  assert.equal(await page.locator('.inbox-error').count(), 0);
+  assert.equal(db.database.prepare('SELECT id FROM user_notifications WHERE id=?').get(otherId), undefined);
+  await chooseAccountAction('#loginButton'); await page.locator('#authUsername').waitFor();
+  await login('InboxOther'); await waitPage(1, 0); await assertPageCount(1); await assertGlobalUnread(0);
+  assert.equal(await page.locator('article.inbox-item').count(), 0);
+  assert.equal(await page.locator('[data-inbox-delete]').count(), 0);
   assert.deepEqual(errors, []);
   fs.rmSync(path.join(screenshots, 'inbox-browser-failure.png'), { force: true });
-  console.log(`PASS: logout isolation, another member's private inbox, mark-all-read and no page exceptions. Screenshots: ${screenshots}`);
+  console.log(`PASS: logout isolation for late list/deletion responses, another member's private inbox, mark-all-read, empty deleted inbox and no page exceptions. Screenshots: ${screenshots}`);
 } catch (error) {
   if (page) { try { await snapshot('inbox-browser-failure.png'); } catch {} }
   console.error(`Inbox browser failure screenshot directory: ${screenshots}`);

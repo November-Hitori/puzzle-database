@@ -3,7 +3,6 @@ import { buildPuzzleToolLinks } from './puzzle-tool-links.mjs';
 import { normalizeUsername, validateAccountPassword } from './auth-policy.mjs';
 import { normalizeCalendarLinks, getCalendarArea } from './calendar-workflow-policy.mjs';
 import { CALENDAR_REVIEW_TAGS, CALENDAR_REVIEW_VOTES } from './calendar-review-policy.mjs';
-import { INBOX_TAGS } from './inbox-policy.mjs';
 
 const state = {
   puzzles: [],
@@ -726,17 +725,8 @@ function notificationEntityMarkup(notification) {
   }
   return '';
 }
-function inboxTagIcon(id) {
-  const shapes = {
-    star: '<path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9Z"/>',
-    flag: '<path d="M5 21V4m0 0c5-4 9 4 14 0v10c-5 4-9-4-14 0Z"/>',
-    bookmark: '<path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4Z"/>',
-    heart: '<path d="M20.8 4.8a5.5 5.5 0 0 0-7.8 0L12 5.9l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.4a5.5 5.5 0 0 0 0-7.8Z"/>'
-  };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${shapes[id] || ''}</svg>`;
-}
 function inboxFilterMarkup() {
-  return `<section class="inbox-filters" aria-label="收件箱筛选"><label for="inboxReadFilter">阅读状态<select id="inboxReadFilter">${[['all', '全部消息'], ['unread', '未读'], ['read', '已读']].map(([value, label]) => `<option value="${value}" ${state.inboxReadFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label for="inboxTagFilter">标签状态<select id="inboxTagFilter">${[['all', '全部标签状态'], ['tagged', '有标签'], ['untagged', '无标签']].map(([value, label]) => `<option value="${value}" ${state.inboxTagFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>${state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all' ? '<button class="button button-light" type="button" id="resetInboxFiltersButton">清除筛选</button>' : ''}</section>`;
+  return `<section class="inbox-filters" aria-label="收件箱筛选"><label for="inboxReadFilter">阅读状态<select id="inboxReadFilter">${[['all', '全部消息'], ['unread', '未读'], ['read', '已读']].map(([value, label]) => `<option value="${value}" ${state.inboxReadFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label for="inboxTagFilter">星标状态<select id="inboxTagFilter">${[['all', '全部星标状态'], ['tagged', '有星标'], ['untagged', '无星标']].map(([value, label]) => `<option value="${value}" ${state.inboxTagFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>${state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all' ? '<button class="button button-light" type="button" id="resetInboxFiltersButton">清除筛选</button>' : ''}</section>`;
 }
 function renderMessages() {
   const notifications = state.inboxItems || [];
@@ -745,13 +735,11 @@ function renderMessages() {
     const isRead = Boolean(item.readAt);
     const pending = state.inboxPendingIds.has(id);
     const disabled = pending || state.inboxLoading || state.inboxReadAllPending || state.usernameRenamePending;
-    const tags = item.tags || [];
-    const tagButtons = INBOX_TAGS.map(({ id: tagId, label }) => {
-      const selected = tags.includes(tagId);
-      const description = `${selected ? '移除' : '添加'}${label}标签`;
-      return `<button class="inbox-tag-button" type="button" data-inbox-tag="${tagId}" data-inbox-id="${esc(id)}" aria-label="${description}" title="${description}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}>${inboxTagIcon(tagId)}</button>`;
-    }).join('');
-    return `<article class="inbox-item ${isRead ? 'is-read' : 'is-unread'}" data-inbox-id="${esc(id)}"><div class="inbox-item-copy"><div class="inbox-item-heading"><h2>${esc(item.title || '通知')}</h2><time>${esc(item.createdAt || '')}</time></div><p>${esc(item.body || '')}</p>${notificationEntityMarkup(item)}</div><div class="inbox-item-actions"><div class="inbox-tag-options" role="group" aria-label="消息图标标签" aria-busy="${pending}">${tagButtons}</div>${!isRead ? `<button class="button button-light" type="button" data-inbox-read="${esc(id)}" ${disabled ? 'disabled' : ''}>${pending ? '正在保存…' : '标记已读'}</button>` : '<span class="inbox-read-label">已读</span>'}</div></article>`;
+    const starred = Boolean(item.tags?.length);
+    const starDescription = starred ? '取消星标' : '添加星标';
+    const starButton = `<button class="inbox-tag-button" type="button" data-inbox-tag="star" data-inbox-id="${esc(id)}" aria-label="${starDescription}" title="${starDescription}" aria-pressed="${starred}" ${disabled ? 'disabled' : ''}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9Z"/></svg></button>`;
+    const deleteButton = `<button class="inbox-delete-button" type="button" data-inbox-delete="${esc(id)}" aria-label="删除消息" title="删除消息" ${disabled ? 'disabled' : ''}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7M14 10v7"/></svg></button>`;
+    return `<article class="inbox-item ${isRead ? 'is-read' : 'is-unread'}" data-inbox-id="${esc(id)}"><div class="inbox-item-copy"><div class="inbox-item-heading"><h2>${esc(item.title || '通知')}</h2><time>${esc(item.createdAt || '')}</time></div><p>${esc(item.body || '')}</p>${notificationEntityMarkup(item)}</div><div class="inbox-item-actions"><div class="inbox-tag-options" role="group" aria-label="消息操作" aria-busy="${pending}">${starButton}${deleteButton}</div>${!isRead ? `<button class="button button-light" type="button" data-inbox-read="${esc(id)}" ${disabled ? 'disabled' : ''}>${pending ? '正在保存…' : '标记已读'}</button>` : '<span class="inbox-read-label">已读</span>'}</div></article>`;
   }).join('');
   const filtered = state.inboxReadFilter !== 'all' || state.inboxTagFilter !== 'all';
   const empty = state.inboxLoading ? '<div class="empty-state" role="status">正在加载通知…</div>' : state.inboxError ? '<div class="empty-state">通知加载失败，请刷新重试。</div>' : `<div class="empty-state">${filtered ? '没有符合筛选条件的通知。' : '目前没有通知。'}</div>`;
@@ -824,9 +812,9 @@ function prefetchInboxNextPage() {
   if (index * INBOX_PAGE_SIZE >= state.inboxTotal || state.inboxPages[index]) return null;
   return requestInboxPage(index);
 }
-async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { clear = false } = {}) {
+async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id, { clear = false, pageIndex = 0 } = {}) {
   if (!isCurrentUserSession(epoch, userId)) return false;
-  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter, offset: '0' });
+  const params = new URLSearchParams({ limit: String(INBOX_PAGE_SIZE), read: state.inboxReadFilter, tag: state.inboxTagFilter, offset: String(pageIndex * INBOX_PAGE_SIZE) });
   const previousIndex = state.inboxPageIndex;
   const previousTotal = state.inboxTotal;
   resetInboxPagination();
@@ -841,9 +829,14 @@ async function refreshInbox(epoch = state.sessionEpoch, userId = state.user?.id,
   try {
     const data = await apiRequest(`/api/inbox?${params.toString()}`, { signal: controller.signal });
     if (!isCurrent()) return false;
-    state.inboxPages = [{ notifications: data.notifications || [], nextBefore: data.nextBefore || null, total: Number(data.total || 0) }];
-    showInboxPage(0);
     state.inboxUnreadCount = Number(data.unreadCount || 0);
+    const page = { notifications: data.notifications || [], nextBefore: data.nextBefore || null, total: Number(data.total || 0) };
+    if (!page.notifications.length && pageIndex > 0 && pageIndex * INBOX_PAGE_SIZE >= page.total) {
+      state.inboxTotal = page.total;
+      return await refreshInbox(epoch, userId, { pageIndex: Math.max(0, Math.ceil(page.total / INBOX_PAGE_SIZE) - 1) });
+    }
+    state.inboxPages[pageIndex] = page;
+    showInboxPage(pageIndex);
     return true;
   } catch (error) {
     if (isCurrent()) state.inboxError = error.message || '无法加载通知，请刷新重试。';
@@ -859,12 +852,13 @@ async function loadInboxFresh() {
   state.inboxActionError = '';
   await refreshInbox(epoch, userId);
 }
-async function toggleInboxTag(id, tagId) {
+async function toggleInboxTag(id) {
   const key = String(id);
   const item = state.inboxItems.find((entry) => String(entry.id) === key);
-  if (!item || state.inboxPendingIds.has(key) || state.inboxLoading || state.inboxReadAllPending || state.usernameRenamePending || !INBOX_TAGS.some((tag) => tag.id === tagId)) return;
+  if (!item || state.inboxPendingIds.has(key) || state.inboxLoading || state.inboxReadAllPending || state.usernameRenamePending) return;
   const epoch = state.sessionEpoch; const userId = state.user?.id;
-  const tags = (item.tags || []).includes(tagId) ? item.tags.filter((tag) => tag !== tagId) : [...(item.tags || []), tagId];
+  // Historical flag, bookmark and heart tags share the single star control.
+  const tags = item.tags?.length ? [] : ['star'];
   cancelInboxPrefetch();
   state.inboxPendingIds.add(key); state.inboxActionError = ''; renderRoute();
   try {
@@ -873,7 +867,29 @@ async function toggleInboxTag(id, tagId) {
     state.inboxItems = state.inboxItems.map((entry) => String(entry.id) === key ? { ...entry, tags: data.tags } : entry).filter(matchesInboxFilters);
     await refreshInbox(epoch, userId);
   } catch (error) {
-    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '标签保存失败，请重试。';
+    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '星标保存失败，请重试。';
+  } finally {
+    if (isCurrentUserSession(epoch, userId)) { state.inboxPendingIds.delete(key); renderRoute(); prefetchInboxNextPage(); }
+  }
+}
+async function deleteInboxMessage(id) {
+  const key = String(id);
+  if (!state.inboxItems.some((item) => String(item.id) === key) || state.inboxPendingIds.has(key) || state.inboxReadAllPending || state.inboxLoading || state.usernameRenamePending) return;
+  const epoch = state.sessionEpoch; const userId = state.user?.id;
+  cancelInboxPrefetch();
+  state.inboxPendingIds.add(key); state.inboxActionError = ''; renderRoute();
+  try {
+    const data = await apiRequest(`/api/inbox/${encodeURIComponent(key)}`, { method: 'DELETE' });
+    if (!isCurrentUserSession(epoch, userId)) return;
+    state.inboxUnreadCount = Number(data.unreadCount || 0);
+    state.inboxItems = state.inboxItems.filter((item) => String(item.id) !== key);
+    state.inboxTotal = Math.max(0, state.inboxTotal - 1);
+    const pageIndex = Math.min(state.inboxPageIndex, Math.max(0, Math.ceil(state.inboxTotal / INBOX_PAGE_SIZE) - 1));
+    state.inboxPageIndex = pageIndex;
+    state.inboxPageJumpValue = String(pageIndex + 1);
+    await refreshInbox(epoch, userId, { pageIndex });
+  } catch (error) {
+    if (isCurrentUserSession(epoch, userId)) state.inboxActionError = error.message || '消息删除失败，请重试。';
   } finally {
     if (isCurrentUserSession(epoch, userId)) { state.inboxPendingIds.delete(key); renderRoute(); prefetchInboxNextPage(); }
   }
@@ -965,7 +981,8 @@ function changeInboxFilters(read, tag) {
 function bindMessages() {
   document.querySelector('#refreshInboxButton')?.addEventListener('click', loadInboxFresh);
   document.querySelectorAll('[data-inbox-read]').forEach((button) => button.addEventListener('click', () => markInboxRead(button.dataset.inboxRead)));
-  document.querySelectorAll('[data-inbox-tag]').forEach((button) => button.addEventListener('click', () => toggleInboxTag(button.dataset.inboxId, button.dataset.inboxTag)));
+  document.querySelectorAll('[data-inbox-tag]').forEach((button) => button.addEventListener('click', () => toggleInboxTag(button.dataset.inboxId)));
+  document.querySelectorAll('[data-inbox-delete]').forEach((button) => button.addEventListener('click', () => deleteInboxMessage(button.dataset.inboxDelete)));
   document.querySelector('#markAllInboxReadButton')?.addEventListener('click', markAllInboxRead);
   document.querySelector('#previousInboxPageButton')?.addEventListener('click', () => { void changeInboxPage(-1); });
   document.querySelector('#nextInboxPageButton')?.addEventListener('click', () => { void changeInboxPage(1); });

@@ -16,7 +16,7 @@ const {createServer}=await import('../server.mjs');
 const {database,createSession}=await import('../db.mjs');
 const iconTags=['star','flag','bookmark','heart'];
 
-test('inbox icon tags and read filters are persistent, recipient scoped and paginated together',async(t)=>{
+test('inbox tags, read filters and deletion are persistent, recipient scoped and paginated together',async(t)=>{
   const server=createServer();
   t.after(async()=>{
     server.closeAllConnections();
@@ -99,6 +99,72 @@ test('inbox icon tags and read filters are persistent, recipient scoped and pagi
     assert.deepEqual(otherInbox.notifications.map(item=>item.id),[otherId]);
     assert.deepEqual(otherInbox.notifications[0].tags,['heart']);
     assert.deepEqual((await request('/api/inbox?read=unread&tag=tagged',{member:'inbox-empty'})).body,{notifications:[],unreadCount:0,nextBefore:null});
+  });
+
+  await t.test('deletion removes message tags and updates unread counts without changing referenced entities',async()=>{
+    resetNotifications();
+    const ruleId=Number(database.prepare(`INSERT INTO rules(title_zh,title_en,rules_zh,rules_en,category,is_variant)
+      VALUES ('Inbox reference rule','Inbox reference rule','[]','[]','其它',0)`).run().lastInsertRowid);
+    const puzzleId=Number(database.prepare(`INSERT INTO puzzles(number,title,type,author,source,scope,rule_id)
+      VALUES (987654321,'Inbox reference puzzle','Test','Inbox Owner','Test','calendar',?)`).run(ruleId).lastInsertRowid);
+    const unreadId=addNotification(),readId=addNotification('inbox-owner','2026-02-03 04:05:06');
+    const remainingId=addNotification(),otherId=addNotification('inbox-other');
+    database.prepare('UPDATE user_notifications SET entity_type=?,entity_id=? WHERE id=?').run('calendar-puzzle',puzzleId,unreadId);
+    database.prepare('UPDATE user_notifications SET entity_type=?,entity_id=? WHERE id=?').run('rule',ruleId,readId);
+    await setTags(unreadId,iconTags);
+    await setTags(readId,['star']);
+    await setTags(otherId,['heart'],{member:'inbox-other'});
+    const puzzleBefore=database.prepare('SELECT * FROM puzzles WHERE id=?').get(puzzleId);
+    const ruleBefore=database.prepare('SELECT * FROM rules WHERE id=?').get(ruleId);
+    const remainingBefore=row(remainingId),otherBefore=row(otherId);
+
+    const deletedUnread=await request(`/api/inbox/${unreadId}`,{method:'DELETE'});
+    assert.equal(deletedUnread.status,200);
+    assert.deepEqual(deletedUnread.body,{deleted:true,id:unreadId,unreadCount:1});
+    assert.equal(row(unreadId),undefined);
+    assert.deepEqual(database.prepare('SELECT tag FROM user_notification_tags WHERE notification_id=?').all(unreadId),[]);
+    const deletedRead=await request(`/api/inbox/${readId}`,{method:'DELETE'});
+    assert.equal(deletedRead.status,200);
+    assert.deepEqual(deletedRead.body,{deleted:true,id:readId,unreadCount:1});
+    assert.equal(row(readId),undefined);
+    assert.deepEqual(database.prepare('SELECT tag FROM user_notification_tags WHERE notification_id=?').all(readId),[]);
+    assert.equal((await request(`/api/inbox/${unreadId}`,{method:'DELETE'})).status,404);
+    assert.deepEqual(database.prepare('SELECT * FROM puzzles WHERE id=?').get(puzzleId),puzzleBefore);
+    assert.deepEqual(database.prepare('SELECT * FROM rules WHERE id=?').get(ruleId),ruleBefore);
+    assert.deepEqual(row(remainingId),remainingBefore);
+    assert.deepEqual(row(otherId),otherBefore);
+    const inbox=(await request('/api/inbox?offset=0&limit=1')).body;
+    assert.deepEqual(inbox.notifications.map(item=>item.id),[remainingId]);
+    assert.equal(inbox.unreadCount,1);
+    assert.equal(inbox.total,1);
+    assert.equal(inbox.nextOffset,null);
+    assert.deepEqual((await request('/api/inbox?read=read&tag=tagged')).body,{notifications:[],unreadCount:1,nextBefore:null});
+    const otherInbox=(await request('/api/inbox',{member:'inbox-other'})).body;
+    assert.deepEqual(otherInbox.notifications.map(item=>item.id),[otherId]);
+    assert.deepEqual(otherInbox.notifications[0].tags,['heart']);
+    assert.equal(otherInbox.unreadCount,1);
+    assert.deepEqual((await request(`/api/inbox/${remainingId}`,{method:'DELETE'})).body,{deleted:true,id:remainingId,unreadCount:0});
+    assert.deepEqual((await request('/api/inbox')).body,{notifications:[],unreadCount:0,nextBefore:null});
+  });
+
+  await t.test('authentication, same origin, ownership and valid identifiers protect deletion',async()=>{
+    resetNotifications();
+    const ownId=addNotification(),otherId=addNotification('inbox-other');
+    await setTags(ownId,['star']);
+    await setTags(otherId,iconTags,{member:'inbox-other'});
+    const rowsBefore=database.prepare('SELECT * FROM user_notifications ORDER BY id').all();
+    const tagsBefore=database.prepare('SELECT * FROM user_notification_tags ORDER BY notification_id,tag').all();
+    assert.equal((await request(`/api/inbox/${ownId}`,{method:'DELETE',member:null})).status,401);
+    assert.equal((await request(`/api/inbox/${ownId}`,{method:'DELETE',origin:'https://other.example'})).status,403);
+    assert.equal((await request(`/api/inbox/${otherId}`,{method:'DELETE'})).status,404);
+    assert.equal((await request(`/api/inbox/${ownId}`,{method:'DELETE',member:'inbox-other'})).status,404);
+    for (const id of [0,-1,'1.5','invalid',9007199254740992,999999999]) {
+      assert.equal((await request(`/api/inbox/${id}`,{method:'DELETE'})).status,404,String(id));
+    }
+    assert.deepEqual(database.prepare('SELECT * FROM user_notifications ORDER BY id').all(),rowsBefore);
+    assert.deepEqual(database.prepare('SELECT * FROM user_notification_tags ORDER BY notification_id,tag').all(),tagsBefore);
+    assert.equal((await request('/api/inbox')).body.unreadCount,1);
+    assert.equal((await request('/api/inbox',{member:'inbox-other'})).body.unreadCount,1);
   });
 
   await t.test('invalid tag bodies cannot change existing tags or mark a notification read',async()=>{
