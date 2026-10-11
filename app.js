@@ -280,9 +280,21 @@ function participantNamesMarkup(participants, emptyLabel) {
   if (!Array.isArray(participants) || !participants.length) return `<span class="participant-empty">${esc(emptyLabel)}</span>`;
   return participants.map((participant) => `<span class="participant-name">${esc(participant?.username || participant?.name || '未知用户')}</span>`).join('');
 }
+function calendarLikingIcon(value) {
+  const faces = {
+    '-2': '<path d="M8 9h.01M16 9h.01M8 17c1.5-3 6.5-3 8 0"></path><path d="M17 11c0 1.2-1.2 2-1.2 3a1.2 1.2 0 0 0 2.4 0c0-1-1.2-1.8-1.2-3Z"></path>',
+    '0': '<path d="M8 9h.01M16 9h.01M8 16h8"></path>',
+    '2': '<path d="M8 9h.01M16 9h.01M8 14c1.5 3 6.5 3 8 0"></path>',
+    veto: '<path d="m7 7 3 2m7-2-3 2M8 11h.01M16 11h.01M8 17c1.5-3 6.5-3 8 0"></path>',
+  };
+  return `<svg class="liking-score-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"></circle>${faces[value]}</svg>`;
+}
 function calendarReviewParticipantsMarkup(participants = {}) {
-  const groups=[-2,-1,0,1,2,'veto'].map(value=>[value,value==='veto'?'一票否决':`${value>0?'+':''}${value} 分`,value==='veto'?'暂无否决':'暂无此分值的评价']);
-  return `<dl class="participant-list vote-participants">${groups.map(([value,label,emptyLabel])=>`<div class="participant-row" data-liking-value="${value}"><dt>${label}</dt><dd>${participantNamesMarkup(participants?.[value],emptyLabel)}</dd></div>`).join('')}</dl>`;
+  return `<dl class="participant-list vote-participants">${[-2,-1,0,1,2,'veto'].map((value) => {
+    const label = calendarVoteLabel(value);
+    const icon = [-2,0,2,'veto'].includes(value);
+    return `<div class="participant-row${value === 'veto' ? ' participant-veto-row' : ''}" data-liking-value="${value}"><dt title="${esc(label)}">${icon ? `${calendarLikingIcon(value)}<span class="sr-only">${esc(label)}</span>` : `<span>${value > 0 ? '+' : ''}${value}</span><span class="sr-only"> 分</span>`}</dt><dd>${participantNamesMarkup(participants?.[value], value === 'veto' ? '暂无否决' : '暂无')}</dd></div>`;
+  }).join('')}</dl>`;
 }
 function ratingParticipantsMarkup(participants, label = '评分者') {
   return `<dl class="participant-list rating-participants"><div class="participant-row"><dt>${esc(label)}</dt><dd>${participantNamesMarkup(participants, '尚无人评分')}</dd></div></dl>`;

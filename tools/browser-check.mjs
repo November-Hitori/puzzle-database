@@ -29,6 +29,9 @@ const passwordHash = await hashPassword(password);
 for (const [id, name] of [['reviewer-1', 'NativeOne'], ['reviewer-2', 'NativeTwo'], ['reviewer-3', 'NativeThree']]) {
   db.database.prepare('INSERT INTO trusted_users(id,name,username,username_key,password_hash) VALUES (?,?,?,?,?)').run(id, name, name, name.toLowerCase(), passwordHash);
 }
+const longParticipantName = 'PositiveMemberWithLongName123456';
+assert.equal(longParticipantName.length, 32);
+db.database.prepare('INSERT INTO trusted_users(id,name,username,username_key,password_hash) VALUES (?,?,?,?,?)').run('long-participant', longParticipantName, longParticipantName, longParticipantName.toLowerCase(), passwordHash);
 const ruleInput = { titleZh: '标准规则', titleEn: 'Standard Native Rule', category: '其它', rulesZh: ['按题面线索完成谜题。'], rulesEn: [], isVariant: false, baseRuleId: null, exampleUrl: 'https://penpa-edit.com/?m=solve&p=isolated-example', exampleAuthor: '' };
 const standard = db.addRule(ruleInput, 'browser-owner');
 const auditDraft = db.addRule({ ...ruleInput, titleZh: '浏览器审计检查', titleEn: 'Native Audit' }, 'browser-owner');
@@ -41,6 +44,9 @@ db.database.prepare('INSERT INTO trusted_users(id,name) VALUES (?,?)').run('lega
 const spoilerId = db.database.prepare('SELECT id FROM puzzles WHERE number=?').get(spoiler.number).id;
 db.database.prepare('INSERT INTO calendar_review_votes(puzzle_id,user_id,review_round,vote) VALUES (?,?,1,?)').run(spoilerId, 'legacy-browser', 'oppose');
 db.database.prepare('INSERT INTO calendar_evaluations(puzzle_id,user_id,review_round,difficulty,tags_json) VALUES (?,?,1,4,?)').run(spoilerId, 'legacy-browser', '[]');
+for (const [id, vote] of [['reviewer-2', -1], ['reviewer-3', 0], ['long-participant', 1]]) {
+  assert.ok(db.completeCalendarReview(spoiler.number, id, { difficulty: 3, tags: [], vote, expectedReviewRound: 1 }).puzzle);
+}
 db.addCalendarComment(spoiler.number, 'reviewer-1', '<script>window.unsafeComment = true</script>\n测试解题思路');
 const shared = db.addCalendarPuzzle({title:'共同补充链接',author:'NativeOne',source:'pzplus',puzzlinkUrl:'https://pzplus.tck.mn/p.html?slither/3/3/0000',inputMode:'external',ruleId:standard.id},{id:'reviewer-1'}).puzzle;
 for (const [id,vote] of [['reviewer-1',2],['reviewer-2',1],['reviewer-3',0]]) assert.ok(db.completeCalendarReview(shared.number,id,{difficulty:3,tags:[],vote,expectedReviewRound:1}).puzzle);
@@ -67,6 +73,41 @@ async function navigate(hash, selector) {
 async function screenshot(name) {
   await page.locator('#toast.show').waitFor({ state: 'hidden', timeout: 5000 });
   await page.screenshot({ path: path.join(screenshots, name), fullPage: true });
+}
+async function assertReviewParticipantLayout(expectedMembers, { mobile = false } = {}) {
+  const participants = page.locator('.calendar-review-panel > .calendar-participant-section .vote-participants');
+  const layout = await participants.evaluate((list) => [...list.querySelectorAll(':scope > .participant-row')].map((row) => {
+    const label = row.querySelector('dt');
+    const rect = row.getBoundingClientRect();
+    const svg = label.querySelector('svg');
+    const icon = svg?.getBoundingClientRect();
+    return {
+      value: row.dataset.likingValue,
+      label: [label.getAttribute('aria-label'), label.getAttribute('title'), label.textContent, svg?.getAttribute('aria-label')].filter(Boolean).join(' ').replaceAll('\u2212', '-'),
+      names: [...row.querySelectorAll('.participant-name')].map((name) => name.textContent),
+      x: rect.x, top: rect.top, right: rect.right, bottom: rect.bottom,
+      membersTop: row.querySelector('dd').getBoundingClientRect().top,
+      iconCount: label.querySelectorAll('svg').length,
+      iconWidth: icon?.width || 0, iconHeight: icon?.height || 0,
+    };
+  }));
+  assert.deepEqual(layout.map((group) => group.value), ['-2', '-1', '0', '1', '2', 'veto']);
+  for (const group of layout) {
+    const label = group.value === 'veto' ? '一票否决' : group.value === '1' ? '+1' : group.value;
+    assert.ok(group.label.includes(label), `${group.value} retains a readable score label or accessible name`);
+    assert.equal(group.iconCount, ['-2', '0', '2', 'veto'].includes(group.value) ? 1 : 0, `${group.value} uses the requested vector face or numeric label`);
+    if (group.iconCount) assert.ok(group.iconWidth > 0 && group.iconWidth <= 24 && group.iconHeight > 0 && group.iconHeight <= 24, 'participant faces stay small');
+    if (Object.hasOwn(expectedMembers, group.value)) assert.deepEqual(group.names.toSorted(), expectedMembers[group.value].toSorted(), `${group.value} retains all members after layout and viewport changes`);
+  }
+  const scores = layout.slice(0, 5), veto = layout.at(-1);
+  if (!mobile) {
+    assert.ok(Math.max(...scores.map((group) => group.top)) - Math.min(...scores.map((group) => group.top)) <= 2, 'desktop scores share one horizontal row');
+    assert.ok(scores.every((group, index) => !index || group.x > scores[index - 1].x), 'desktop scores increase from left to right');
+  }
+  assert.ok(Math.max(...scores.map((group) => group.membersTop)) - Math.min(...scores.map((group) => group.membersTop)) <= 2, 'short and long participant lists begin together below the score line');
+  assert.ok(veto.top >= Math.max(...scores.map((group) => group.bottom)) - 1, 'veto remains on its own row below every numeric score');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'participant names and faces stay within the page viewport');
+  return layout;
 }
 async function duplicateDisabledClick(selector) {
   assert.equal(await page.locator(selector).isDisabled(), true);
@@ -305,8 +346,15 @@ try {
   assert.ok(!(await currentVoteParticipants.locator('.participant-row[data-liking-value="2"]').textContent()).includes('BrowserOwner'));
   assert.equal(participantFrame, true);
   assert.equal(await page.evaluate(() => window.testIframe === document.querySelector('#puzzleEmbed iframe')), true);
+  const expectedParticipants = { '-2': ['BrowserOwner', '<img src=x onerror="window.unsafeParticipant=true">'], '-1': ['NativeTwo'], '0': ['NativeThree'], '1': [longParticipantName], '2': ['NativeOne'], veto: [] };
+  await assertReviewParticipantLayout(expectedParticipants);
   await screenshot('calendar-participants-browser-desktop.png');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertReviewParticipantLayout(expectedParticipants, { mobile: true });
+  await screenshot('calendar-participants-browser-mobile.png');
+  await page.setViewportSize({ width: 1440, height: 1000 });
   console.log('PASS: native spoiler controls, safe comments, failed-comment draft, delayed vote and preserved iframe');
+  console.log('PASS: five horizontal score groups, small accessible vector faces, complete member names, independent veto row and 390px layout');
 
   await navigate(`calendar-puzzle-${shared.number}`, '#editSharedPenpaLinksButton');
   assert.equal(await page.locator('#editCalendarPuzzleButton').count(),0);
@@ -396,7 +444,14 @@ try {
 
   await navigate(`calendar-puzzle-${number}`, '.calendar-workflow-panel'); await page.locator('#completePuzzleButton').click();
   await page.locator('label:has(input[name="calendarVote"][value="veto"])').click(); await page.locator('#submitCalendarEvaluationButton').click();
-  await page.locator('#reenterCalendarPuzzleButton').waitFor(); await page.locator('#calendarCommentBody').fill('否决后仍可留言'); await page.locator('#sendCalendarCommentButton').click();
+  await page.locator('#reenterCalendarPuzzleButton').waitFor();
+  await assertReviewParticipantLayout({ veto: ['BrowserOwner'] });
+  await screenshot('calendar-participants-veto-browser-desktop.png');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertReviewParticipantLayout({ veto: ['BrowserOwner'] }, { mobile: true });
+  await screenshot('calendar-participants-veto-browser-mobile.png');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator('#calendarCommentBody').fill('否决后仍可留言'); await page.locator('#sendCalendarCommentButton').click();
   await page.waitForFunction(() => document.querySelector('#calendarCommentsList').textContent.includes('否决后仍可留言'));
   await page.locator('#reenterCalendarPuzzleButton').click(); await page.locator('#confirmCalendarReentryButton').click(); await page.locator('#completePuzzleButton').waitFor();
   assert.equal(db.getCalendarPuzzle(number, 'browser-owner').calendarArea, 'review');
