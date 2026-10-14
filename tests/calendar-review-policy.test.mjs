@@ -12,7 +12,10 @@ test('calendar reviews require a bounded difficulty, unique supported tags, vote
   assert.equal(normalizeCalendarReviewInput({difficulty:6,tags:[],vote:'unknown',expectedReviewRound:1}).error,'vote');
   assert.equal(normalizeCalendarReviewInput({difficulty:6,tags:[],vote:'support',expectedReviewRound:0}).error,'round');
   assert.equal(normalizeCalendarReviewInput({difficulty:6,tags:[],vote:'neutral',expectedReviewRound:1}).error,'vote');
-  assert.equal(CALENDAR_REVIEW_TAGS.length,6);
+  assert.equal(CALENDAR_REVIEW_TAGS.length,7);
+  assert.deepEqual(normalizeCalendarReviewInput({difficulty:3,tags:['爆试'],vote:1,expectedReviewRound:1}).value.tags,['爆试']);
+  assert.deepEqual(normalizeCalendarReviewInput({difficulty:3,tags:[...CALENDAR_REVIEW_TAGS].reverse(),vote:1,expectedReviewRound:1}).value.tags,CALENDAR_REVIEW_TAGS);
+  assert.equal(normalizeCalendarReviewInput({difficulty:3,tags:['爆试','爆试'],vote:1,expectedReviewRound:1}).error,'tags');
 });
 
 test('liking approval needs three distinct scoring rows and an exactly positive average; veto overrides',()=>{

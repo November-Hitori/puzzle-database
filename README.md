@@ -25,7 +25,7 @@ API 包括：
 - `POST /api/register`：使用共享邀请码注册用户名/密码并自动建立私有会话
 - `GET /api/session`、`POST /api/session`、`DELETE /api/session`：查询会话、使用用户名/密码登录和销毁会话
 - `/api/rules`：读取、创建、更新和删除规则；可分组提交名称、中文说明（英文可选）与 Penpa 例题审计。存在公共题目、日历题目或变体引用时不能删除
-- `/api/calendar/puzzles`：读写独立日历投稿；完成记录包含 1–6 难度、六种可选评价标签，以及 `-2`、`-1`、`0`、`1`、`2` 喜爱程度评分或 `veto`。至少三名不同成员评分且未四舍五入的平均分严格大于 0 后通过；否决会转入可重新投稿的待处理区。旧客户端的 `support` / `oppose` 输入分别按 `2` / `-2` 处理
+- `/api/calendar/puzzles`：读写独立日历投稿；完成记录包含 1–6 难度、七种可选评价标签，以及 `-2`、`-1`、`0`、`1`、`2` 喜爱程度评分或 `veto`。至少三名不同成员评分且未四舍五入的平均分严格大于 0 后通过；否决会转入可重新投稿的待处理区。旧客户端的 `support` / `oppose` 输入分别按 `2` / `-2` 处理
 - `/api/calendar/puzzles/:number/comments`：登录成员可独立留言，包括否决后；已完成成员直接读取，未完成者默认隐藏，主动查看时使用 `?reveal=1`
 - `PATCH /api/calendar/puzzles/:number`：投稿者可修改名称、链接，携带 `expectedEditVersion` 和 `expectedReviewRound`；`clearReviews` 默认 `false`，为 `true` 时删除所有轮次的难度、标签、投票并开启新轮次，保留完成记录和留言
 - `POST /api/calendar/puzzles/:number/assignment`：成员分配或取消正式日期，携带 `expectedEditVersion`、`expectedReviewRound` 与 `assignedDate`（完整日期或 `null`）；非通过题目、年份不符、无效日期和日期冲突均拒绝

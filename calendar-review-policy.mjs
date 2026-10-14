@@ -4,7 +4,8 @@ export const CALENDAR_REVIEW_TAGS = Object.freeze([
   '需要复杂结构',
   '需要全局观察',
   '通灵',
-  '美观'
+  '美观',
+  '爆试'
 ]);
 
 export const CALENDAR_LIKING_SCORES = Object.freeze([-2,-1,0,1,2]);
