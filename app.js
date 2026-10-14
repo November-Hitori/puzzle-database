@@ -67,6 +67,8 @@ const state = {
   ruleFilter: 'all',
   ruleQuery: '',
   submissionDraft: null,
+  puzzleDrafts: new Map(),
+  puzzleSubmissionPending: new Map(),
   auditPending: new Set()
 };
 const app = document.querySelector('#app');
@@ -77,6 +79,7 @@ const accountMenu = document.querySelector('#accountMenu');
 const accountMenuButton = document.querySelector('#accountMenuButton');
 const calendarReviewMobileLayout = window.matchMedia('(max-width: 780px)');
 let toastTimer;
+let activeSubmission = null;
 let accountMenuSessionEpoch = -1;
 const API_REQUEST_TIMEOUT_MS = 20000;
 let privateLoadAttempt = 0;
@@ -227,7 +230,7 @@ function requireRulesForModal(title, openWhenReady) {
   retry.addEventListener('click', attempt);
   void attempt();
 }
-function clearPrivateState() { closeAccountMenu(); resetCalendarPagination(); resetInboxPagination(); privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.inboxReadFilter = 'all'; state.inboxTagFilter = 'all'; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; state.usernameRenamePending = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
+function clearPrivateState() { closeAccountMenu(); resetCalendarPagination(); resetInboxPagination(); privateLoadAttempt += 1; privateLoadController?.abort(); privateLoadController = null; state.sessionEpoch += 1; state.authEpoch += 1; state.user = null; state.puzzles = []; state.calendarPuzzles = []; state.calendarLeftovers = []; state.rules = []; state.rulesStatus = 'idle'; state.rulesError = ''; rulesLoadPromise = null; state.folders = []; state.collections = []; state.currentCollection = null; state.submissionDraft = null; state.puzzleDrafts.clear(); state.puzzleSubmissionPending.clear(); state.penpaGuidelines = null; state.auditPending = new Set(); state.calendarReturnRoute = 'calendar'; state.inboxItems = []; state.inboxUnreadCount = 0; state.inboxNextBefore = null; state.inboxLoading = false; state.inboxError = ''; state.inboxActionError = ''; state.inboxPendingIds = new Set(); state.inboxReadAllPending = false; state.inboxReadFilter = 'all'; state.inboxTagFilter = 'all'; state.lastPrivateRouteName = null; state.serviceError = ''; state.authError = ''; state.privateLoading = false; state.authBusy = false; state.usernameRenamePending = false; clearTimeout(toastTimer); toastElement.classList.remove('show'); toastElement.textContent = ''; closeModal(); }
 function handleUnauthorized() { clearPrivateState(); state.sessionChecked = true; state.authMode = 'login'; state.authError = '登录状态已失效，请重新登录。'; renderRoute(); }
 const externalLinkIcon = '<svg class="external-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3h7v7M21 3l-9 9M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"></path></svg>';
 
@@ -235,8 +238,15 @@ function esc(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&':
 function ratingMarkup(values, votes) { return `<div class="rating-set" title="${votes} 位解题者的平均评分"><span class="rating-item">✎ <b>${values[0].toFixed(1)}</b></span><span class="rating-item">♧ <b>${values[1].toFixed(1)}</b></span><span class="rating-item">♥ <b>${values[2].toFixed(1)}</b></span></div>`; }
 function tagMarkup(tags) { return `<div class="tag-list">${tags.map((tag) => `<span class="tag ${tag === 'Wrong Puzzle' ? 'warning' : tag === 'Example Puzzle' ? 'type' : ''}">${esc(tag)}</span>`).join('')}</div>`; }
 function showToast(message) { if (document.body.dataset.authState !== 'authenticated') return; toastElement.textContent = message; toastElement.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastElement.classList.remove('show'), 2600); }
-function openModal(content) { closeAccountMenu(); modalContent.innerHTML = content; modalBackdrop.hidden = false; document.body.style.overflow = 'hidden'; }
+function rememberSubmissionDraft() {
+  const submission = activeSubmission;
+  activeSubmission = null;
+  if (submission && isCurrentUserSession(submission.epoch, submission.userId)
+    && state.puzzleDrafts.get(submission.scope) === submission) submission.draft = submission.capture();
+}
+function openModal(content) { rememberSubmissionDraft(); closeAccountMenu(); modalContent.innerHTML = content; modalBackdrop.hidden = false; document.body.style.overflow = 'hidden'; }
 function closeModal() {
+  rememberSubmissionDraft();
   modalBackdrop.hidden = true; modalContent.innerHTML = ''; document.body.style.overflow = '';
   if (!state.user || !state.privateDataReady) return;
   const detailReady = document.querySelector('#calendarDetailLoading') && state.calendarDetailStates.get(getRoute().number)?.status !== 'loading';
@@ -1272,23 +1282,42 @@ function calendarLinkFields(prefix, puzzle = {}) {
 function readCalendarLinks(prefix, inputMode = 'external') {
   return normalizeCalendarLinks({inputMode,penpaEditUrl:document.getElementById(`${prefix}PenpaEdit`).value,penpaSolveUrl:document.getElementById(`${prefix}PenpaSolve`).value,puzzlinkUrl:document.getElementById(`${prefix}Puzzlink`).value});
 }
-function openAddPuzzle(scope = 'library', draft = {}) {
+function openAddPuzzle(scope = 'library', draft = null) {
+  scope = scope === 'calendar' ? 'calendar' : 'library';
+  draft ??= state.puzzleDrafts.get(scope)?.draft || {};
   if (state.rulesStatus !== 'loaded') { requireRulesForModal('准备投稿', () => openAddPuzzle(scope, draft)); return; }
   const isCalendar = scope === 'calendar';
-  const initialRule = state.rules.find((rule) => String(draft.ruleId || '') === String(rule.id));
+  const initialRule = draft.rule && String(draft.rule.id) === String(draft.ruleId) ? draft.rule : state.rules.find((rule) => String(draft.ruleId || '') === String(rule.id));
+  let selectedRule = initialRule || null;
   const initialRuleId = initialRule ? String(initialRule.id) : '';
   const uploaderName = state.user?.username || state.user?.name || '';
   const authorFields = isCalendar
-    ? `<label class="form-field"><span>投稿用户</span><input id="newPuzzleUploader" type="text" value="${esc(uploaderName)}" readonly /><span class="form-help">投稿身份由登录账号确定。</span></label><label class="form-field"><span>题目作者 / 署名（可选）</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || uploaderName)}" placeholder="题目作者名" /></label>`
+    ? `<label class="form-field"><span>投稿用户</span><input id="newPuzzleUploader" type="text" value="${esc(uploaderName)}" readonly /><span class="form-help">投稿身份由登录账号确定。</span></label><label class="form-field"><span>题目作者 / 署名（可选）</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author ?? uploaderName)}" placeholder="题目作者名" /></label>`
     : `<label class="form-field"><span>作者</span><input id="newPuzzleAuthor" type="text" value="${esc(draft.author || '')}" placeholder="作者名" /></label>`;
-  openModal(`<p class="modal-eyebrow">${isCalendar ? 'PRIVATE CALENDAR' : 'NEW LIBRARY ENTRY'}</p><h2 id="modalTitle">${isCalendar ? '提交日历谜题' : '添加一道题目'}</h2><p class="modal-intro">先选择目录中的规则；如果没有合适规则，可以创建后自动返回此表单。</p><div class="form-field"><span id="submissionRuleLabel">规则（必选）</span><div class="submission-rule-picker"><input id="submissionRuleSearch" type="search" role="combobox" aria-labelledby="submissionRuleLabel" aria-autocomplete="list" aria-expanded="false" aria-controls="submissionRuleOptions" aria-required="true" autocomplete="off" value="${initialRule ? esc(ruleDisplayName(initialRule)) : ''}" placeholder="搜索中英文规则或分类" /><input id="submissionRule" type="hidden" value="${esc(initialRuleId)}" /><div class="submission-rule-dropdown" id="submissionRuleDropdown" hidden><div id="submissionRuleOptions" class="submission-rule-options" role="listbox" aria-labelledby="submissionRuleLabel"></div><p id="submissionRuleStatus" class="submission-rule-status" role="status" hidden></p></div></div><button class="text-button rule-create-inline" id="createRuleFromSubmission" type="button">＋ 新建规则</button></div><div id="submissionRulePreview" class="submission-rule-preview"></div><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" value="${esc(draft.title || '')}" placeholder="例如：Five Cells" /></label>${isCalendar ? calendarLinkFields('newPuzzle',draft) : `<label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" value="${esc(draft.url || '')}" placeholder="https://puzz.link/..." /></label>`}${authorFields}<label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external" ${draft.inputMode !== 'blank' ? 'selected' : ''}>外部题目（puzz.link / penpa+）</option><option value="blank" ${draft.inputMode === 'blank' ? 'selected' : ''}>纯填空题</option></select></label><label class="form-field"><span>作者说明（可选）</span><textarea id="newPuzzleNote" rows="3" placeholder="简要介绍这道题">${esc(draft.note || '')}</textarea></label><label class="form-field"><span>答案（纯填空题可选）</span><input id="newPuzzleAnswer" type="text" value="${esc(draft.answer || '')}" placeholder="答案" /></label>${isCalendar ? `<div class="form-field"><span>建议年份和日期（日期可选）</span>${renderCalendarDateInputs('newPuzzleDate', Number(draft.calendarYear) || 2028, draft.suggestedMonthDay || (draft.suggestedDate ? draft.suggestedDate.slice(5) : ''))}</div>` : ''}<div class="modal-error" id="submissionError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
-  if (isCalendar) bindCalendarDateInputs('newPuzzleDate');
+  openModal(`<p class="modal-eyebrow">${isCalendar ? 'PRIVATE CALENDAR' : 'NEW LIBRARY ENTRY'}</p><h2 id="modalTitle">${isCalendar ? '提交日历谜题' : '添加一道题目'}</h2><p class="modal-intro">先选择目录中的规则；如果没有合适规则，可以创建后自动返回此表单。</p><div class="form-field"><span id="submissionRuleLabel">规则（必选）</span><div class="submission-rule-picker"><input id="submissionRuleSearch" type="search" role="combobox" aria-labelledby="submissionRuleLabel" aria-autocomplete="list" aria-expanded="false" aria-controls="submissionRuleOptions" aria-required="true" autocomplete="off" value="${initialRule ? esc(ruleDisplayName(initialRule)) : esc(draft.ruleSearch || '')}" placeholder="搜索中英文规则或分类" /><input id="submissionRule" type="hidden" value="${esc(initialRuleId)}" /><div class="submission-rule-dropdown" id="submissionRuleDropdown" hidden><div id="submissionRuleOptions" class="submission-rule-options" role="listbox" aria-labelledby="submissionRuleLabel"></div><p id="submissionRuleStatus" class="submission-rule-status" role="status" hidden></p></div></div><button class="text-button rule-create-inline" id="createRuleFromSubmission" type="button">＋ 新建规则</button></div><div id="submissionRulePreview" class="submission-rule-preview"></div><label class="form-field"><span>题目标题</span><input id="newPuzzleTitle" type="text" value="${esc(draft.title || '')}" placeholder="例如：Five Cells" /></label>${isCalendar ? calendarLinkFields('newPuzzle',draft) : `<label class="form-field"><span>题目链接（外链题目可填写）</span><input id="newPuzzleUrl" type="url" value="${esc(draft.url || '')}" placeholder="https://puzz.link/..." /></label>`}${authorFields}<label class="form-field"><span>类型</span><select id="newPuzzleMode"><option value="external" ${draft.inputMode !== 'blank' ? 'selected' : ''}>外部题目（puzz.link / penpa+）</option><option value="blank" ${draft.inputMode === 'blank' ? 'selected' : ''}>纯填空题</option></select></label><label class="form-field"><span>作者说明（可选）</span><textarea id="newPuzzleNote" rows="3" placeholder="简要介绍这道题">${esc(draft.note || '')}</textarea></label><label class="form-field"><span>答案（纯填空题可选）</span><input id="newPuzzleAnswer" type="text" value="${esc(draft.answer || '')}" placeholder="答案" /></label>${isCalendar ? `<div class="form-field"><span>建议年份和日期（日期可选）</span>${renderCalendarDateInputs('newPuzzleDate', Number(draft.calendarYear) || 2028, draft.suggestedMonthDay || (draft.suggestedDate ? draft.suggestedDate.slice(5) : ''))}</div>` : ''}<div class="modal-error" id="submissionError" role="alert"></div><div class="modal-footer"><button class="button button-light modal-cancel" type="button">取消</button>${button('保存题目', 'savePuzzleButton')}</div>`);
+  if (isCalendar) {
+    if (draft.dateFields) {
+      document.querySelector('#newPuzzleDateYear').value = draft.dateFields.year;
+      document.querySelector('#newPuzzleDateMonth').value = draft.dateFields.month;
+      document.querySelector('#newPuzzleDateDay').dataset.initial = draft.dateFields.day;
+    }
+    bindCalendarDateInputs('newPuzzleDate');
+  }
   bindRuleSearchPicker('submissionRule', () => state.rules, () => {
     const rule = state.rules.find((item) => String(item.id) === document.querySelector('#submissionRule').value);
+    selectedRule = rule || null;
     document.querySelector('#submissionRulePreview').innerHTML = rule ? `<strong>${ruleTitlePair(rule)}</strong>${clauseMarkup(rule.rulesZh)}` : '<span class="muted">选择目录规则后可预览规则。</span>';
   });
-  document.querySelector('#createRuleFromSubmission').addEventListener('click', () => { state.submissionDraft = { scope, draft: captureSubmissionDraft() }; openRuleEditor({ fromSubmission: true }); });
-  document.querySelector('#savePuzzleButton').addEventListener('click', async () => {
+  const submission = { scope, epoch: state.sessionEpoch, userId: state.user?.id, draft,
+    capture: () => ({ ...captureSubmissionDraft(), rule: selectedRule }) };
+  state.puzzleDrafts.set(scope, submission);
+  activeSubmission = submission;
+  document.querySelector('#createRuleFromSubmission').addEventListener('click', () => { state.submissionDraft = { scope, submission, draft: captureSubmissionDraft() }; openRuleEditor({ fromSubmission: true }); });
+  const saveButton = document.querySelector('#savePuzzleButton');
+  saveButton.disabled = state.puzzleSubmissionPending.has(scope);
+  if (saveButton.disabled) saveButton.textContent = '正在发布…';
+  saveButton.addEventListener('click', async () => {
+    if (saveButton.disabled || state.puzzleSubmissionPending.has(scope)) return;
     const title = document.querySelector('#newPuzzleTitle').value.trim(); const mode = document.querySelector('#newPuzzleMode').value; const links = isCalendar ? readCalendarLinks('newPuzzle',mode) : null; const url = isCalendar ? links.value?.url || '' : document.querySelector('#newPuzzleUrl').value.trim(); const ruleId = document.querySelector('#submissionRule').value;
     if (!title || !ruleId) { document.querySelector('#submissionError').textContent = title ? '请选择规则，或先创建一条新规则。' : '请填写题目标题。'; return; }
     if (links?.error) { document.querySelector('#submissionError').textContent = links.error; return; }
@@ -1298,17 +1327,42 @@ function openAddPuzzle(scope = 'library', draft = {}) {
     const input = { title, ruleId, type: mode === 'blank' ? '填空题' : '逻辑题', author: document.querySelector('#newPuzzleAuthor').value.trim() || state.user.name, source: mode === 'blank' ? '填空题' : getPuzzleSource(url), url, inputMode: mode, answer: document.querySelector('#newPuzzleAnswer').value.trim(), note: document.querySelector('#newPuzzleNote').value.trim() };
     if (isCalendar) { Object.assign(input,links.value); input.author = document.querySelector('#newPuzzleAuthor').value.trim() || state.user.username || state.user.name; input.calendarYear = calendarDate.calendarYear; input.suggestedMonthDay = calendarDate.suggestedMonthDay; }
     const requestEpoch = state.sessionEpoch; const userId = state.user?.id; const errorNode = document.querySelector('#submissionError');
+    const submittedDraft = captureSubmissionDraft();
+    state.puzzleSubmissionPending.set(scope, submission);
+    saveButton.disabled = true; saveButton.textContent = '正在发布…';
     try {
       const path = isCalendar ? '/api/calendar/puzzles' : '/api/puzzles'; const data = await apiRequest(path, { method: 'POST', body: JSON.stringify(input) });
-      if (isCalendar) { const puzzle = normalizePuzzle(data.puzzle || data.puzzles?.find((item) => item.number === Math.max(...data.puzzles.map((item) => item.number)))); applyCalendarPuzzle(puzzle); closeModal(); window.location.hash = `#calendar-puzzle-${puzzle.number}`; }
-      else { applyPuzzleData(data.puzzles); const newest = Math.max(...state.puzzles.map((puzzle) => puzzle.number)); closeModal(); window.location.hash = `#puzzle-${newest}`; }
+      if (!isCurrentUserSession(requestEpoch, userId)) return;
+      const current = state.puzzleDrafts.get(scope);
+      const currentDraft = current === activeSubmission ? current.capture() : current?.draft;
+      const unchanged = currentDraft && Object.keys(submittedDraft).every((key) => JSON.stringify(currentDraft[key]) === JSON.stringify(submittedDraft[key]));
+      const submissionStillOpen = unchanged && current === activeSubmission;
+      if (unchanged) state.puzzleDrafts.delete(scope);
+      if (submissionStillOpen) activeSubmission = null;
+      let puzzleHash;
+      if (isCalendar) {
+        const puzzle = normalizePuzzle(data.puzzle || data.puzzles?.find((item) => item.number === Math.max(...data.puzzles.map((item) => item.number))));
+        applyCalendarPuzzle(puzzle); puzzleHash = `#calendar-puzzle-${puzzle.number}`;
+      } else {
+        applyPuzzleData(data.puzzles); puzzleHash = `#puzzle-${Math.max(...state.puzzles.map((puzzle) => puzzle.number))}`;
+      }
+      if (submissionStillOpen) { closeModal(); window.location.hash = puzzleHash; }
       showToast('题目已创建');
-    } catch (error) { if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message; }
+    } catch (error) {
+      if (isCurrentUserSession(requestEpoch, userId) && errorNode.isConnected) errorNode.textContent = error.message;
+    } finally {
+      if (state.puzzleSubmissionPending.get(scope) === submission) {
+        state.puzzleSubmissionPending.delete(scope);
+        const currentSave = activeSubmission?.scope === scope ? document.querySelector('#savePuzzleButton') : saveButton;
+        if (currentSave?.isConnected && String(state.user?.id) === String(userId)) { currentSave.disabled = false; currentSave.textContent = '保存题目'; }
+      }
+    }
   });
 }
-function captureSubmissionDraft() { const draft = { ruleId: document.querySelector('#submissionRule')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '' }; if (document.querySelector('#newPuzzlePenpaEdit')) { for (const [key,id] of [['penpaEditUrl','PenpaEdit'],['penpaSolveUrl','PenpaSolve'],['puzzlinkUrl','Puzzlink']]) draft[key] = document.getElementById(`newPuzzle${id}`).value; } if (document.querySelector('#newPuzzleDateYear')) Object.assign(draft, readCalendarDateFields('newPuzzleDate')); return draft; }
+function captureSubmissionDraft() { const draft = { ruleId: document.querySelector('#submissionRule')?.value || '', ruleSearch: document.querySelector('#submissionRuleSearch')?.value || '', title: document.querySelector('#newPuzzleTitle')?.value || '', url: document.querySelector('#newPuzzleUrl')?.value || '', author: document.querySelector('#newPuzzleAuthor')?.value || '', inputMode: document.querySelector('#newPuzzleMode')?.value || 'external', note: document.querySelector('#newPuzzleNote')?.value || '', answer: document.querySelector('#newPuzzleAnswer')?.value || '' }; if (document.querySelector('#newPuzzlePenpaEdit')) { for (const [key,id] of [['penpaEditUrl','PenpaEdit'],['penpaSolveUrl','PenpaSolve'],['puzzlinkUrl','Puzzlink']]) draft[key] = document.getElementById(`newPuzzle${id}`).value; } if (document.querySelector('#newPuzzleDateYear')) draft.dateFields = { year: document.querySelector('#newPuzzleDateYear').value, month: document.querySelector('#newPuzzleDateMonth').value, day: document.querySelector('#newPuzzleDateDay').value }; return draft; }
 function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = {}) {
   if (state.rulesStatus !== 'loaded') { requireRulesForModal('打开规则编辑器', () => openRuleEditor({ fromSubmission, draft, rule })); return; }
+  const sourceSubmission = fromSubmission ? state.submissionDraft : null;
   const editing = Boolean(rule);
   const rejectedItems = editing ? ['name', 'description', 'example'].filter((item) => rule.quality?.groups?.[item]?.rejected || rule.quality?.groups?.[item]?.status === 'rejected') : [];
   const rejectedHint = rejectedItems.length ? `<p class="audit-edit-warning" role="note">${rejectedItems.map((item) => auditLabels[item]).join('、')}已被打回。只有实际修改该项内容后才会重新开始审核；重新保存相同内容不会清除打回状态。</p>` : '';
@@ -1340,9 +1394,11 @@ function openRuleEditor({ fromSubmission = false, draft = null, rule = null } = 
       const saveMessage = !editing ? '规则草稿已创建。' : changedAuditItems.length ? `已保存；${changedAuditItems.map((item) => auditLabels[item]).join('、')}审核重新开始，其他项进度保留。` : '已保存；审核进度保持不变。';
       const editorStillOpen = errorNode.isConnected;
       if (editorStillOpen) closeModal();
-      if (fromSubmission && editorStillOpen) openAddPuzzle(state.submissionDraft?.scope || 'calendar', { ...(state.submissionDraft?.draft || draft || {}), ruleId: savedRule?.id || '' });
+      const returnedDraft = { ...(sourceSubmission?.draft || draft || {}), ruleId: savedRule?.id || '', rule: savedRule };
+      if (sourceSubmission && state.puzzleDrafts.get(sourceSubmission.scope) === sourceSubmission.submission) sourceSubmission.submission.draft = returnedDraft;
+      if (fromSubmission && editorStillOpen) openAddPuzzle(sourceSubmission?.scope || 'calendar', returnedDraft);
       else { renderRoute(); if (editorStillOpen) showToast(saveMessage); }
-      state.submissionDraft = null;
+      if (state.submissionDraft === sourceSubmission) state.submissionDraft = null;
     } catch (error) {
       if (!isCurrentUserSession(requestEpoch, userId)) return;
       if (error.status === 409) { if (errorNode.isConnected) closeModal(); try { await refreshRules(requestEpoch, userId); } catch { if (!isCurrentUserSession(requestEpoch, userId)) return; showToast('这条规则版本已更新，但刷新目录失败；请稍后重试。'); return; } if (!isCurrentUserSession(requestEpoch, userId)) return; renderRoute(); showToast('这条规则已被其他成员修改，目录已刷新；请基于最新版本重新编辑。'); return; }
