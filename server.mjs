@@ -362,7 +362,7 @@ async function handleApi(request,response,pathname,trustLoopbackProxy) {
     const view=params.get('view')??'calendar',sort=params.get('sort')??'date',q=(params.get('q')??'').trim();
     if(!Number.isSafeInteger(limit)||limit<1||limit>50||!Number.isSafeInteger(offset)||offset<0
       ||!Number.isSafeInteger(year)||year<1000||year>9999||!Number.isSafeInteger(month)||month<1||month>12
-      ||!['calendar','pending','leftovers','allocation','finished'].includes(view)||!['date','newest'].includes(sort)||!validText(q,200))
+      ||!['calendar','pending','leftovers','allocation','finished','submissions'].includes(view)||!['date','newest'].includes(sort)||!validText(q,200))
       return sendJson(response,400,{error:'invalid calendar pagination or filter'});
     return sendJson(response,200,getCalendarPage(user.id,{limit,offset,view,sort,year,month,q}));
   }

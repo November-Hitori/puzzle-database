@@ -38,11 +38,11 @@ test('calendar pages filter and sort before hydrating ten items and keep the com
   const rule=db.addRule({titleZh:'分页规则',titleEn:'Pagination rule',rulesZh:['规则'],rulesEn:[],category:'其它',isVariant:false,baseRuleId:null,exampleUrl:'https://penpa-edit.com/?m=edit&p=example',exampleAuthor:''},'owner');
   for(const item of ['name','description','example']) for(const user of ['a','b','c']) assert.ok(db.submitRuleAudit(rule.id,item,'approve','',1,user).rule);
   let number=1000;
-  function seed({title=null,status='pending',suggestedDate=null,assignedDate=null,calendarYear=2028,links=true,audited=false,completed=false}={}) {
+  function seed({title=null,status='pending',suggestedDate=null,assignedDate=null,calendarYear=2028,links=true,audited=false,completed=false,submittedBy='owner',author='Author'}={}) {
     const current=number++;
     const result=db.database.prepare(`INSERT INTO puzzles(number,title,type,author,source,input_mode,scope,rule_id,suggested_date,assigned_date,calendar_year,calendar_status,submitted_by,delete_token,penpa_edit_url,penpa_solve_url)
-      VALUES(?,?,'其它','Author','puzz.link','external','calendar',?,?,?,?,?,'owner',?,?,?)`)
-      .run(current,title??`Puzzle ${current}`,rule.id,suggestedDate,assignedDate,calendarYear,status,`isolated-delete-${current}`,
+      VALUES(?,?,'其它',?,'puzz.link','external','calendar',?,?,?,?,?,?,?,?,?)`)
+      .run(current,title??`Puzzle ${current}`,author,rule.id,suggestedDate,assignedDate,calendarYear,status,submittedBy,`isolated-delete-${current}`,
         links?'https://penpa-edit.com/?m=edit&p=page':'',links?'https://penpa-edit.com/?m=solve&p=page':'');
     const id=Number(result.lastInsertRowid);
     if(audited) for(const user of ['a','b','c']) db.database.prepare(`INSERT INTO calendar_penpa_votes(puzzle_id,revision,guidelines_revision,user_id,decision) VALUES(?,1,?,?,'approve')`).run(id,getPenpaGuidelines().revision,user);
@@ -61,6 +61,7 @@ test('calendar pages filter and sort before hydrating ten items and keep the com
 
   await t.test('authorization and query boundaries',async()=>{
     assert.equal((await request('',null)).status,401);
+    assert.equal((await request('?view=submissions',null)).status,401);
     for(const query of ['limit=0','limit=51','limit=-1','limit=1.5','limit=','offset=-1','offset=1.2','offset=9007199254740992','offset=','view=review','view=','sort=bad','sort=','year=999','year=10000','year=2028.5','month=0','month=13','month=1.2'])
       assert.equal((await request(`?${query}`)).status,400,query);
     assert.equal((await request('?limit=50&offset=9007199254740991')).status,200);
@@ -70,11 +71,11 @@ test('calendar pages filter and sort before hydrating ten items and keep the com
 
   await t.test('each view and sort matches the legacy complete records without missing or repeating entries',async()=>{
     const all=[...db.getCalendarPuzzles('owner'),...db.getCalendarLeftovers('owner')];
-    const counts=all.reduce((value,puzzle)=>{value[puzzle.calendarArea]++;return value;},{review:0,leftover:0,allocation:0,finished:0});
-    assert.deepEqual(counts,{review:25,leftover:12,allocation:14,finished:16});
-    for(const view of ['calendar','pending','leftovers','allocation','finished']) for(const sort of ['date','newest']) {
+    const counts=all.reduce((value,puzzle)=>{value[puzzle.calendarArea]++;value.submissions++;return value;},{review:0,leftover:0,allocation:0,finished:0,submissions:0});
+    assert.deepEqual(counts,{review:25,leftover:12,allocation:14,finished:16,submissions:67});
+    for(const view of ['calendar','pending','leftovers','allocation','finished','submissions']) for(const sort of ['date','newest']) {
       const area=({calendar:'review',leftovers:'leftover',allocation:'allocation',finished:'finished'})[view];
-      const selected=all.filter((puzzle)=>view==='pending'?!puzzle.completed&&puzzle.calendarArea!=='leftover':
+      const selected=all.filter((puzzle)=>view==='submissions'?puzzle.submittedBy.id==='owner':view==='pending'?!puzzle.completed&&puzzle.calendarArea!=='leftover':
         puzzle.calendarArea===area&&(view!=='finished'||puzzle.assignedDate.startsWith('2028-01')));
       const dateKey=(puzzle)=>puzzle.assignedDate||puzzle.suggestedDate||`${puzzle.calendarYear}-99-99`;
       selected.sort((a,b)=>sort==='newest'?b.number-a.number:dateKey(a).localeCompare(dateKey(b))||b.number-a.number);
@@ -141,7 +142,7 @@ test('calendar pages filter and sort before hydrating ten items and keep the com
     const first=(await request(query('  needle  '))).body;
     assert.equal(first.total,67);assert.equal(first.nextOffset,10);
     assert.deepEqual(first.puzzles.map((puzzle)=>puzzle.number),expected.slice(0,10));
-    assert.deepEqual(first.counts,{review:67,leftover:2,allocation:1,finished:15});
+    assert.deepEqual(first.counts,{review:67,leftover:2,allocation:1,finished:15,submissions:number-1000});
     const actual=[];
     let offset=0;
     do {
@@ -229,5 +230,70 @@ test('calendar pages filter and sort before hydrating ten items and keep the com
     assert.equal((await request()).body.counts.finished,0);
     restore("INSERT INTO quality_error_ignores(entity_type,entity_id,error_key,revision,ignored_by) VALUES('rule',?,'missingEnName:name',1,'owner')",rule.id);
     assert.equal((await request()).body.counts.finished,baseline.finished);
+  });
+
+  await t.test('my submissions use account identity across every area and year, then search and paginate',async()=>{
+    assert.equal((await request('?view=submissions','a')).body.total,0);
+    const own=[];
+    for(let index=0;index<11;index++) own.push(seed({title:`Portfolio Needle ${index}`,submittedBy:'a',author:'Shared author',
+      calendarYear:2026+index%4,suggestedDate:index%2?`2027-02-${String(index+1).padStart(2,'0')}`:null}));
+    own.push(seed({title:'Portfolio Needle rejected',submittedBy:'a',author:'Shared author',status:'leftover',calendarYear:2025}));
+    own.push(seed({title:'Portfolio Needle awaiting audits',submittedBy:'a',author:'Different credited author',status:'approved',calendarYear:2030}));
+    own.push(seed({title:'Portfolio Needle finished',submittedBy:'a',author:'Shared author',status:'approved',calendarYear:2031,assignedDate:'2031-06-01',audited:true}));
+    db.database.prepare('INSERT INTO puzzle_completions(puzzle_id,user_id) VALUES(?,?)').run(own[0].id,'a');
+    const other=seed({title:'Portfolio Needle another submitter',submittedBy:'d',author:'Shared author'});
+    seed({title:'Portfolio Needle unknown submitter',submittedBy:null,author:'Shared author'});
+    const publicPuzzle=seed({title:'Portfolio Needle public',submittedBy:'a',author:'Shared author'});
+    db.database.prepare("UPDATE puzzles SET scope='public' WHERE id=?").run(publicPuzzle.id);
+
+    const expected=own.map(({number})=>db.getCalendarPuzzle(number,'a'));
+    for(const sort of ['date','newest']) {
+      const dateKey=(puzzle)=>puzzle.assignedDate||puzzle.suggestedDate||`${puzzle.calendarYear}-99-99`;
+      const sorted=[...expected].sort((a,b)=>sort==='newest'?b.number-a.number:dateKey(a).localeCompare(dateKey(b))||b.number-a.number);
+      const actual=[];
+      let offset=0;
+      do {
+        const result=await request(`?view=submissions&sort=${sort}&offset=${offset}&year=2099&month=12&userId=d&submittedBy=d`,'a');
+        assert.equal(result.status,200);assert.equal(result.body.total,14);assert.equal(result.body.counts.submissions,14);
+        assert.equal(result.body.puzzles.length,Math.min(10,14-offset));
+        assert.ok(result.body.puzzles.every((puzzle)=>puzzle.submittedBy.id==='a'));
+        assert.equal(Object.hasOwn(result.body,'monthEntries'),false);
+        actual.push(...result.body.puzzles);
+        offset=result.body.nextOffset;
+      } while(offset!==null);
+      assert.deepEqual(actual.map((puzzle)=>puzzle.number),sorted.map((puzzle)=>puzzle.number));
+      assert.deepEqual(new Set(actual.map((puzzle)=>puzzle.calendarArea)),new Set(['review','leftover','allocation','finished']));
+      assert.equal(actual.find((puzzle)=>puzzle.number===own[0].number).completed,true);
+    }
+
+    const originalPrepare=db.database.prepare;
+    const hydrated=[];
+    db.database.prepare=function(sql){
+      const statement=originalPrepare.call(this,sql);
+      if(sql.includes('WHERE p.number=? AND p.scope=?')) {
+        const originalGet=statement.get;
+        statement.get=function(...params){hydrated.push(params[2]);return originalGet.apply(this,params);};
+      }
+      return statement;
+    };
+    try {
+      const result=await request('?view=submissions&sort=newest&q=portfolio%20needle&offset=10','a');
+      assert.equal(result.body.total,14);assert.equal(result.body.counts.submissions,14);
+      assert.equal(result.body.nextOffset,null);
+      assert.deepEqual(result.body.puzzles.map((puzzle)=>puzzle.number),own.slice(0,4).reverse().map((puzzle)=>puzzle.number));
+      assert.deepEqual(hydrated,result.body.puzzles.map((puzzle)=>puzzle.number));
+    } finally {db.database.prepare=originalPrepare;}
+
+    const searched=(await request('?view=submissions&q=finished','a')).body;
+    assert.equal(searched.total,1);assert.equal(searched.counts.submissions,14);
+    assert.deepEqual(searched.puzzles.map((puzzle)=>puzzle.number),[own.at(-1).number]);
+    assert.equal((await request(`?view=submissions&q=%23${other.number}`,'a')).body.total,0);
+    assert.deepEqual((await request(`?view=submissions&q=%23${other.number}`,'d')).body.puzzles.map((puzzle)=>puzzle.number),[other.number]);
+    assert.equal((await request('?view=submissions&q=no-matching-title','a')).body.counts.submissions,14);
+    assert.equal((await request('?view=calendar&q=no-matching-title','a')).body.counts.submissions,14);
+    assert.equal((await request('?view=submissions','d')).body.counts.submissions,1);
+    const empty=(await request('?view=submissions&offset=50','a')).body;
+    assert.deepEqual(empty.puzzles,[]);assert.equal(empty.total,14);assert.equal(empty.nextOffset,null);
+    assert.equal((await request('?view=submission','a')).status,400);
   });
 });

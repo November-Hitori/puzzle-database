@@ -92,6 +92,8 @@ let calendarForegroundAttempt = 0;
 let penpaGuidelinesLoadPromise = null;
 const calendarPageRequests = new Map();
 const CALENDAR_PAGE_SIZE = 10;
+const CALENDAR_LIST_ROUTES = ['calendar', 'pending', 'submissions', 'leftovers', 'allocation', 'finished'];
+const CALENDAR_ROUTE_LABELS = { calendar: '待审核区', pending: '我的未完成谜题', submissions: '我的投稿', leftovers: 'leftover 区', allocation: '待分配区', finished: '完成区' };
 let inboxPrefetchRequest = null;
 const INBOX_PAGE_SIZE = 10;
 
@@ -256,8 +258,8 @@ function closeModal() {
 function button(text, id = '', className = 'button button-dark') { return `<button class="${className}" type="button"${id ? ` id="${id}"` : ''}>${text}</button>`; }
 
 function getRoute() { const hash = window.location.hash.slice(1) || 'home'; const calendarMatch = hash.match(/^calendar-puzzle-(\d+)$/); const puzzleMatch = hash.match(/^puzzle-(\d+)$/); const collectionMatch = hash.match(/^collection-(\d+)$/); if (calendarMatch) return { name: 'calendar-puzzle', number: Number(calendarMatch[1]) }; if (puzzleMatch) return { name: 'puzzle', number: Number(puzzleMatch[1]) }; if (collectionMatch) return { name: 'collection', id: Number(collectionMatch[1]) }; return { name: hash.split('/')[0] || 'home' }; }
-function normalizeAuthenticatedRoute() { const route = getRoute(); if (!['calendar', 'pending', 'leftovers', 'allocation', 'finished', 'messages', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
-function setActiveNavigation(name) { const activeRoute = name === 'calendar-puzzle' ? (['leftovers','allocation','finished','pending'].includes(state.calendarReturnRoute) ? state.calendarReturnRoute : 'calendar') : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
+function normalizeAuthenticatedRoute() { const route = getRoute(); if (![...CALENDAR_LIST_ROUTES, 'messages', 'rules', 'calendar-puzzle'].includes(route.name)) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#calendar`); return getRoute(); }
+function setActiveNavigation(name) { const activeRoute = name === 'calendar-puzzle' ? (CALENDAR_LIST_ROUTES.includes(state.calendarReturnRoute) ? state.calendarReturnRoute : 'calendar') : name; document.querySelectorAll('[data-route-link]').forEach((link) => link.classList.toggle('active', link.dataset.routeLink === activeRoute)); }
 
 function filteredPuzzles() {
   const filtered = state.puzzles.filter((puzzle) => { if (state.filter === 'completed') return puzzle.completed; if (state.filter === 'wrong') return puzzle.tags.includes('Wrong Puzzle'); if (state.filter === 'logic') return puzzle.type === '逻辑题'; if (state.filter === 'word') return puzzle.type === '文字题'; return true; });
@@ -635,7 +637,7 @@ function captureCalendarInputFocus() {
     ? { id: input.id, start: input.selectionStart, end: input.selectionEnd } : null;
 }
 function calendarSearchMarkup(view) {
-  const area = ({ calendar: '待审核区', pending: '我的未完成谜题', leftovers: 'leftover 区', allocation: '待分配区', finished: '完成区' })[view];
+  const area = CALENDAR_ROUTE_LABELS[view];
   const scope = view === 'finished' ? `${state.calendarViewYear} 年 ${state.calendarMonth} 月的完成区` : area;
   const sort = view === 'finished' ? '' : `<label class="calendar-search-sort" for="calendarSort"><span>排序</span><select id="calendarSort"><option value="date" ${state.calendarSort==='date'?'selected':''}>建议日期</option><option value="newest" ${state.calendarSort==='newest'?'selected':''}>最近提交</option></select></label>`;
   return `<section class="calendar-search"><form id="calendarSearchForm" novalidate><label class="calendar-search-field" for="calendarSearchInput"><span>搜索题目</span><input id="calendarSearchInput" type="search" maxlength="200" value="${esc(state.calendarSearchDraft)}" placeholder="题号或题目名称" autocomplete="off" aria-describedby="calendarSearchScope calendarSearchError" /></label><div class="calendar-search-actions"><button class="button button-dark" id="calendarSearchButton" type="submit">搜索</button>${sort}</div></form><p class="calendar-search-scope" id="calendarSearchScope">搜索范围：${esc(scope)}</p><p class="calendar-search-error" id="calendarSearchError" role="alert">${esc(state.calendarSearchError)}</p></section>`;
@@ -653,7 +655,7 @@ function calendarPaginationMarkup(view) {
 function calendarPageMessage(view) {
   if (state.calendarPageError) return `<div class="error-state" role="alert"><p>${esc(state.calendarPageError)}</p><button class="button button-light" id="retryCalendarPageButton" type="button">重试加载</button></div>`;
   if (!currentCalendarPage(view)) return '<div class="empty-state" role="status">正在加载题目…</div>';
-  return state.calendarSearchQuery ? `<div class="empty-state">没有符合“${esc(state.calendarSearchQuery)}”的题目。</div>` : '<div class="empty-state">这个区域暂无题目。</div>';
+  return state.calendarSearchQuery ? `<div class="empty-state">没有符合“${esc(state.calendarSearchQuery)}”的题目。</div>` : view === 'submissions' ? '<div class="empty-state">你还没有投稿，点击“提交日历谜题”发布第一道题目吧。</div>' : '<div class="empty-state">这个区域暂无题目。</div>';
 }
 function calendarPuzzleRows(puzzles, area) {
   return puzzles.map((puzzle) => {
@@ -670,9 +672,10 @@ function renderCalendar(route = 'calendar') {
   const area = ({calendar:'review',leftovers:'leftover',allocation:'allocation'})[route];
   const page = currentCalendarPage(route);
   const puzzles = page?.puzzles || [];
-  const title = ({calendar:'待审核区',leftovers:'leftover 区',allocation:'待分配区',pending:'我的未完成谜题'})[route] || '待审核区';
+  const title = CALENDAR_ROUTE_LABELS[route] || '待审核区';
   const rows = calendarPuzzleRows(puzzles, area);
-  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">PUZZLE CALENDAR</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${calendarSearchMarkup(route)}<div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
+  const introduction = route === 'submissions' ? '<p class="page-description">汇总当前账号提交的全部日历谜题，包含待审核、leftover、待分配和完成区的投稿。</p>' : '';
+  return `<div class="page-wrap-inner"><section class="page-heading"><div><p class="eyebrow">${route === 'submissions' ? 'MY SUBMISSIONS' : 'PUZZLE CALENDAR'}</p><h1>${title}<span class="heading-period">.</span></h1></div>${button('＋ 提交日历谜题','addCalendarPuzzleButton')}</section>${introduction}${calendarSearchMarkup(route)}<div class="calendar-list">${rows || calendarPageMessage(route)}</div>${calendarPaginationMarkup(route)}</div>`;
 }
 function renderCalendarLeftovers() { return renderCalendar('leftovers'); }
 function renderFinishedCalendar() {
@@ -1080,7 +1083,7 @@ function renderPuzzlePage(number, scope = 'library') {
   const calendarEvaluation = isCalendar ? `<section class="calendar-evaluation-section" aria-label="题目评价">${reviewAction}${calendarReview}${dateControl}${renderCalendarWorkflow(puzzle)}</section>` : '';
   const authorName = puzzle.author || puzzle.submittedBy?.name || '未知作者';
   const authorLabel = isCalendar ? esc(authorName) : `<a href="#authors">${esc(authorName)}</a>`;
-  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? state.calendarReturnRoute : 'library'}">← 返回${isCalendar ? ({pending:'我的未完成谜题',leftovers:'leftover 区',allocation:'待分配区',finished:'完成区'})[state.calendarReturnRoute] || '待审核区' : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 ${authorLabel} 发布${isCalendar ? `　·　${esc(calendarDateLabel(puzzle))}` : `　·　${puzzle.votes} 位解题者评分`}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${isCalendarOwner ? '<button type="button" class="button button-light" id="editCalendarPuzzleButton">编辑题目</button>' : ''}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : deletePuzzleControl}</div></section><section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${!isCalendar ? reviewAction : ''}${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section>${isCalendar ? renderCalendarComments(puzzle) : ''}${calendarEvaluation}</div>`;
+  return `<div class="page-wrap-inner puzzle-page"><a class="back-link" href="#${isCalendar ? state.calendarReturnRoute : 'library'}">← 返回${isCalendar ? CALENDAR_ROUTE_LABELS[state.calendarReturnRoute] || '待审核区' : '题库'}</a><section class="puzzle-header"><div><p class="eyebrow"><span class="eyebrow-line"></span>${isCalendar ? 'CALENDAR PUZZLE' : 'PUZZLE'} #${puzzle.number}</p><h1>${esc(puzzle.title)}<span class="heading-period">.</span></h1><p class="puzzle-meta-large">${esc(puzzle.type)}　·　由 ${authorLabel} 发布${isCalendar ? `　·　${esc(calendarDateLabel(puzzle))}` : `　·　${puzzle.votes} 位解题者评分`}</p></div><div class="puzzle-header-tags">${tagMarkup(puzzle.tags)}${isCalendarOwner ? '<button type="button" class="button button-light" id="editCalendarPuzzleButton">编辑题目</button>' : ''}${!isCalendar ? '<button class="tag-add-button" type="button" id="addTagButton">+ 添加标签</button>' : deletePuzzleControl}</div></section><section class="puzzle-content-grid"><div class="puzzle-board-column"><div class="embed-toolbar"><span class="embed-label">${puzzle.inputMode === 'blank' ? 'SELF-CONTAINED' : 'OPEN PUZZLE'}</span></div><div class="puzzle-embed" id="puzzleEmbed">${renderEmbed(puzzle)}</div></div><aside class="puzzle-sidebar"><div class="detail-block"><h3>作者的话</h3><p>${esc(puzzle.note || '暂无说明。')}</p></div><div class="detail-block"><h3>规则</h3>${ruleSection}</div>${!isCalendar ? reviewAction : ''}${!isCalendar ? '<div class="detail-block"><h3>留言板</h3><p class="muted">还没有留言。</p><div class="comment-box"><input type="text" placeholder="写下你的想法" aria-label="留言内容" /><button type="button" id="commentButton">发送</button></div></div>' : ''}</aside></section>${isCalendar ? renderCalendarComments(puzzle) : ''}${calendarEvaluation}</div>`;
 }
 
 function renderPuzzleOpenTools(puzzle) {
@@ -1118,7 +1121,7 @@ async function refreshCalendarData(epoch = state.sessionEpoch, userId = state.us
     if (modalBackdrop.hidden) renderRoute();
     return result;
   }
-  if (['calendar', 'pending', 'leftovers', 'allocation', 'finished'].includes(route.name)) return loadCalendarPage(route.name);
+  if (CALENDAR_LIST_ROUTES.includes(route.name)) return loadCalendarPage(route.name);
   if (modalBackdrop.hidden) renderRoute();
   return true;
 }
@@ -1162,7 +1165,7 @@ function openCalendarReentry(puzzle) {
       const data = await apiRequest(`/api/calendar/puzzles/${encodeURIComponent(target.number)}/reenter`, { method: 'POST', body: JSON.stringify({ expectedReviewRound: target.reviewRound }) });
       if (!isCurrentUserSession(requestEpoch, userId)) return;
       applyCalendarPuzzle(data.puzzle);
-      const mayClose = errorNode.isConnected; if (mayClose) closeModal(); state.calendarReturnRoute = 'calendar'; const detailHash = `#calendar-puzzle-${target.number}`; if (window.location.hash === detailHash) updateCalendarReviewPage(data.puzzle); else window.location.hash = detailHash; if (mayClose) showToast(`「${target.title}」已进入新一轮`);
+      const mayClose = errorNode.isConnected; if (mayClose) closeModal(); if (state.calendarReturnRoute !== 'submissions') state.calendarReturnRoute = 'calendar'; const detailHash = `#calendar-puzzle-${target.number}`; if (window.location.hash === detailHash) updateCalendarReviewPage(data.puzzle); else window.location.hash = detailHash; if (mayClose) showToast(`「${target.title}」已进入新一轮`);
     } catch (error) {
       if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return;
       if (error.status === 409) { try { await refreshCalendarData(requestEpoch, userId); } catch {} if (!isCurrentUserSession(requestEpoch, userId) || !errorNode.isConnected) return; errorNode.textContent = '轮次已被其他成员更新，列表已刷新。请取消后重新打开确认框。'; confirm.disabled = true; confirm.textContent = '轮次已更新'; }
@@ -1747,7 +1750,7 @@ function openDeleteCalendarPuzzleConfirmation(target) {
       if (Array.isArray(data.puzzles)) state.calendarPuzzles = data.puzzles.map(normalizePuzzle);
       await refreshCalendarData(requestEpoch, userId);
       if (!isCurrentUserSession(requestEpoch, userId)) return;
-      state.calendarReturnRoute = ['pending', 'leftovers', 'allocation', 'finished'].includes(target.returnRoute) ? target.returnRoute : 'calendar';
+      state.calendarReturnRoute = CALENDAR_LIST_ROUTES.includes(target.returnRoute) ? target.returnRoute : 'calendar';
       const confirmationStillOpen = errorNode.isConnected;
       if (confirmationStillOpen) closeModal();
       window.location.hash = `#${state.calendarReturnRoute}`;
@@ -1915,7 +1918,7 @@ function renderRoute() {
   if (state.serviceError) { app.innerHTML = `<div class="page-wrap-inner"><div class="error-state" role="alert"><strong>私人数据暂时无法加载</strong><p>${esc(state.serviceError)}</p><button class="button button-light" type="button" id="retryPrivateButton">重试</button></div></div>`; document.querySelector('#retryPrivateButton')?.addEventListener('click', loadPrivateData); return; }
   const enteredMessages = state.privateDataReady && route.name === 'messages' && state.lastPrivateRouteName !== 'messages';
   state.lastPrivateRouteName = route.name;
-  const calendarListRoute = ['calendar', 'pending', 'leftovers', 'allocation', 'finished'].includes(route.name);
+  const calendarListRoute = CALENDAR_LIST_ROUTES.includes(route.name);
   if (calendarListRoute) selectCalendarQuery(route.name);
   else if (calendarPageRequests.size) cancelCalendarPageRequests();
   if (route.name === 'calendar-puzzle') {

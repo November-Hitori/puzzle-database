@@ -1053,14 +1053,15 @@ export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='
   const searchSql=!query?'':numericQuery?' AND p.number=?':' AND instr(calendar_search_lower(p.title),?)>0';
   const searchParams=!query?[]:[numericQuery?(Number.isSafeInteger(puzzleNumber)?puzzleNumber:-1):query.toLowerCase()];
   const rows=database.prepare(`SELECT p.id,p.number,p.title,p.rule_id,p.calendar_status,p.calendar_year,
-      p.suggested_date,p.assigned_date,(p.penpa_edit_url<>'') AS penpa_edit_url,
+      p.suggested_date,p.assigned_date,(p.submitted_by=?) AS own_submission,(p.penpa_edit_url<>'') AS penpa_edit_url,
       (p.penpa_solve_url<>'') AS penpa_solve_url,p.penpa_revision,
       r.title_zh AS rule_title_zh,r.title_en AS rule_title_en,
       EXISTS (SELECT 1 FROM puzzle_completions c WHERE c.puzzle_id=p.id AND c.user_id=?) AS completed
     FROM puzzles p LEFT JOIN rules r ON r.id=p.rule_id
-    WHERE p.scope='calendar' AND p.calendar_status IN ('pending','approved','leftover')${searchSql}`).all(userId,...searchParams);
+    WHERE p.scope='calendar' AND p.calendar_status IN ('pending','approved','leftover')${searchSql}`).all(userId,userId,...searchParams);
   const qualityData=rows.some((row)=>row.calendar_status==='approved')?getCalendarPageQuality(guidelines,searchSql,searchParams):null;
-  const counts={review:0,leftover:0,allocation:0,finished:0};
+  const counts={review:0,leftover:0,allocation:0,finished:0,submissions:Number(database.prepare(`SELECT COUNT(*) AS count
+    FROM puzzles WHERE scope='calendar' AND calendar_status IN ('pending','approved','leftover') AND submitted_by=?`).get(userId).count)};
   for(const row of rows) {
     if(row.calendar_status==='approved') {
       const quality=getCalendarQuality(row,qualityData.rules.get(row.rule_id)||null,guidelines,qualityData);
@@ -1070,7 +1071,7 @@ export function getCalendarPage(userId,{limit=10,offset=0,view='calendar',sort='
   }
   const monthKey=`${year}-${String(month).padStart(2,'0')}`;
   const area=({calendar:'review',leftovers:'leftover',allocation:'allocation',finished:'finished'})[view];
-  const selected=rows.filter((row)=>view==='pending'?!row.completed&&row.area!=='leftover':
+  const selected=rows.filter((row)=>view==='submissions'?Boolean(row.own_submission):view==='pending'?!row.completed&&row.area!=='leftover':
     row.area===area&&(view!=='finished'||row.assigned_date?.startsWith(monthKey)));
   const dateKey=(row)=>row.assigned_date||row.suggested_date||`${Number(row.calendar_year)||2028}-99-99`;
   selected.sort((a,b)=>sort==='newest'?b.number-a.number:dateKey(a).localeCompare(dateKey(b))||b.number-a.number);

@@ -26,6 +26,7 @@ API 包括：
 - `GET /api/session`、`POST /api/session`、`DELETE /api/session`：查询会话、使用用户名/密码登录和销毁会话
 - `/api/rules`：读取、创建、更新和删除规则；可分组提交名称、中文说明（英文可选）与 Penpa 例题审计。存在公共题目、日历题目或变体引用时不能删除
 - `/api/calendar/puzzles`：读写独立日历投稿；完成记录包含 1–6 难度、七种可选评价标签，以及 `-2`、`-1`、`0`、`1`、`2` 喜爱程度评分或 `veto`。至少三名不同成员评分且未四舍五入的平均分严格大于 0 后通过；否决会转入可重新投稿的待处理区。旧客户端的 `support` / `oppose` 输入分别按 `2` / `-2` 处理
+- `GET /api/calendar/page?view=submissions`：分页整理当前登录账号的全部日历投稿，跨年份包含审核中、待重新投稿、待分配和已完成题目；支持现有标题／编号搜索与日期／最新排序。归属以登录账号 ID 为准，`counts.submissions` 始终统计该账号全部投稿，不受搜索或月份影响
 - `/api/calendar/puzzles/:number/comments`：登录成员可独立留言，包括否决后；已完成成员直接读取，未完成者默认隐藏，主动查看时使用 `?reveal=1`
 - `PATCH /api/calendar/puzzles/:number`：投稿者可修改名称、链接，携带 `expectedEditVersion` 和 `expectedReviewRound`；`clearReviews` 默认 `false`，为 `true` 时删除所有轮次的难度、标签、投票并开启新轮次，保留完成记录和留言
 - `POST /api/calendar/puzzles/:number/assignment`：成员分配或取消正式日期，携带 `expectedEditVersion`、`expectedReviewRound` 与 `assignedDate`（完整日期或 `null`）；非通过题目、年份不符、无效日期和日期冲突均拒绝
@@ -48,6 +49,7 @@ API 包括：
 - 邀请码门控注册、用户名/密码登录和私有会话
 - 待审核区、leftover 区、待分配区和按月份展示的完成区，以及可追溯的逐轮投票/评价历史
 - 日历谜题提交：默认 2028 年；分别填写 Penpa 编辑、Penpa 解题和 puzz.link 链接。外链投稿至少提供一种解题链接，编辑链接可后补；建议日期不占正式档期，投稿者由登录账号确定
+- 我的投稿：左侧栏目汇总当前账号在各年份、各处理区的投稿，支持标题／编号搜索、排序与分页，点击题目可查看状态和管理自己的投稿
 - 个人完成状态、评分与规则浏览
 - 至少三名不同成员评分且未四舍五入的平均分严格大于 0 后通知上传者补齐缺少的 Penpa 链接；正式日期不得重复，取消分配后回到待分配区
 - Penpa 制图规范独立接受三名不同成员审计，规范正文或 Penpa 链接变化后需重新审计；具体规范见 [docs/penpa.md](docs/penpa.md)
